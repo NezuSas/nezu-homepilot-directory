@@ -1,16 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildServer } from '../server.js';
+import { SqliteDirectoryDatabase } from '../infrastructure/SqliteDirectoryDatabase.js';
 import type { FastifyInstance } from 'fastify';
 import type { Response as InjectResponse } from 'light-my-request';
 type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 const apps: FastifyInstance[] = [];
-const createApp = () => { const app = buildServer({ databasePath: ':memory:', jwtSecret: 'test-secret-with-at-least-thirty-two-characters', serveWeb: false }); apps.push(app); return app; };
+const databases = new WeakMap<FastifyInstance, SqliteDirectoryDatabase>();
+const createApp = () => { const database = new SqliteDirectoryDatabase(':memory:'); const app = buildServer({ store: database, jwtSecret: 'test-secret-with-at-least-thirty-two-characters', serveWeb: false }); databases.set(app, database); apps.push(app); return app; };
 afterEach(async () => { await Promise.all(apps.splice(0).map(app => app.close())); });
 async function request(app: FastifyInstance, method: HttpMethod, url: string, payload?: unknown, token?: string): Promise<InjectResponse> {
   return app.inject({ method, url, payload: payload === undefined ? undefined : JSON.stringify(payload), headers: { ...(payload === undefined ? {} : { 'content-type': 'application/json' }), ...(token ? { authorization: `Bearer ${token}` } : {}) } }) as Promise<InjectResponse>;
 }
-async function account(app: FastifyInstance, email: string, displayName: string) { const created = await request(app, 'POST', '/directory/accounts', { email, displayName, password: 'password123' }); expect(created.statusCode).toBe(201); const session = await request(app, 'POST', '/directory/session', { email, password: 'password123' }); return (session.json() as { token: string; account: { id: string } }); }
+async function account(app: FastifyInstance, email: string, displayName: string) { const created = await request(app, 'POST', '/directory/accounts', { email, displayName, password: 'password123' }); expect(created.statusCode).toBe(201); const database = databases.get(app); if (database) database.db.prepare('UPDATE directory_accounts SET email_verified = 1 WHERE email = ?').run(email); const session = await request(app, 'POST', '/directory/session', { email, password: 'password123' }); return (session.json() as { token: string; account: { id: string } }); }
 
 describe('Directory API', () => {
   it('requires DIRECTORY_JWT_SECRET outside explicitly configured tests', () => {
@@ -82,4 +84,32 @@ it('rejects an expired password reset token', async () => {
   const response = await request(app, 'POST', `/directory/password-reset/${resetToken}/confirm`, { password: 'new-password-123' });
   expect(response.statusCode).toBe(400);
   expect(response.json()).toEqual({ error: 'TOKEN_EXPIRED' });
+});
+
+it('requires email verification only before creating or accepting a home membership', async () => {
+  const { InMemoryEmailSender } = await import('../application/EmailSender.js');
+  const sender = new InMemoryEmailSender();
+  const database = new SqliteDirectoryDatabase(':memory:');
+  const app = buildServer({ store: database, jwtSecret: 'test-secret-with-at-least-thirty-two-characters', serveWeb: false, emailSender: sender, publicAppUrl: 'https://directory.example' });
+  apps.push(app);
+  const ownerRegistration = await request(app, 'POST', '/directory/accounts', { email: 'owner-unverified@example.com', displayName: 'Owner', password: 'password123' });
+  expect(ownerRegistration.statusCode).toBe(201);
+  const ownerSession = await request(app, 'POST', '/directory/session', { email: 'owner-unverified@example.com', password: 'password123' });
+  const ownerToken = (ownerSession.json() as { token: string }).token;
+  const blockedHome = await request(app, 'POST', '/directory/homes', { name: 'Casa', edgeHostname: 'https://casa.example.com' }, ownerToken); expect(blockedHome.statusCode).toBe(403); expect(blockedHome.json()).toEqual({ error: 'EMAIL_NOT_VERIFIED' });
+  expect((await request(app, 'GET', '/directory/homes', undefined, ownerToken)).statusCode).toBe(200);
+  const ownerVerification = new URL(sender.sent[0]!.text).searchParams.get('verify')!;
+  expect((await request(app, 'POST', `/directory/accounts/verify-email/${ownerVerification}`)).statusCode).toBe(200);
+  const home = (await request(app, 'POST', '/directory/homes', { name: 'Casa', edgeHostname: 'https://casa.example.com' }, ownerToken)).json() as { id: string };
+  const memberRegistration = await request(app, 'POST', '/directory/accounts', { email: 'member-unverified@example.com', displayName: 'Member', password: 'password123' });
+  expect(memberRegistration.statusCode).toBe(201);
+  const memberSession = await request(app, 'POST', '/directory/session', { email: 'member-unverified@example.com', password: 'password123' });
+  const memberToken = (memberSession.json() as { token: string }).token;
+  const invitation = (await request(app, 'POST', `/directory/homes/${home.id}/invitations`, { email: 'member-unverified@example.com' }, ownerToken)).json() as { token: string };
+  const denied = await request(app, 'POST', `/directory/invitations/${invitation.token}/accept`, undefined, memberToken);
+  expect(denied.statusCode).toBe(403);
+  expect(denied.json()).toEqual({ error: 'EMAIL_NOT_VERIFIED' });
+  const memberVerification = new URL(sender.sent[1]!.text).searchParams.get('verify')!;
+  expect((await request(app, 'POST', `/directory/accounts/verify-email/${memberVerification}`)).statusCode).toBe(200);
+  expect((await request(app, 'POST', `/directory/invitations/${invitation.token}/accept`, undefined, memberToken)).statusCode).toBe(200);
 });

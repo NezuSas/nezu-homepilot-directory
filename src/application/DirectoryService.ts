@@ -29,7 +29,7 @@ export class DirectoryService {
   async requestPasswordReset(emailInput: string): Promise<void> { const account = await this.store.findAccountByEmail(normalizeEmail(emailInput)); if (account) await this.sendToken(account, 'password_reset', 60 * 60 * 1000); }
   async confirmPasswordReset(token: string, password: string): Promise<void> { if (password.length < 8) throw new ValidationError('PASSWORD_TOO_SHORT'); const value = await this.validToken(token, 'password_reset'); const account = await this.requireAccountValue(value.accountId); const consumed = await this.store.consumeAccountToken(value.id, clockNow()); if (!consumed) throw new ValidationError('TOKEN_ALREADY_USED'); await this.store.updateAccount({ ...account, passwordHash: await bcrypt.hash(password, 12) }); }
   async verifyEmail(token: string): Promise<void> { const value = await this.validToken(token, 'email_verify'); const account = await this.requireAccountValue(value.accountId); const consumed = await this.store.consumeAccountToken(value.id, clockNow()); if (!consumed) throw new ValidationError('TOKEN_ALREADY_USED'); await this.store.updateAccount({ ...account, emailVerified: true }); }  async registerHome(actorId: string, input: { name: string; edgeHostname: string }): Promise<DirectoryHome> {
-    await this.requireAccount(actorId); const home = createHome(input.name, input.edgeHostname, actorId); const owner = createMembership({homeId:home.id,accountId:actorId,invitedByAccountId:null,role:'owner'});
+    const account = await this.requireAccountValue(actorId); if (!account.emailVerified) throw new ForbiddenError("EMAIL_NOT_VERIFIED"); const home = createHome(input.name, input.edgeHostname, actorId); const owner = createMembership({homeId:home.id,accountId:actorId,invitedByAccountId:null,role:"owner"});
     await this.store.createHome(home); await this.store.createMembership(owner); await this.audit(actorId, home.id, owner.id, 'home.created'); return home;
   }
   async listHomes(accountId: string): Promise<Array<{ id: string; name: string; edgeHostname: string; role: 'owner'|'member' }>> {
@@ -50,7 +50,7 @@ export class DirectoryService {
   }
   async acceptInvitation(accountId: string, token: string): Promise<DirectoryHomeMembership> {
     const member=await this.store.findByInvitationTokenHash(hashInvitation(token)); if(!member) throw new NotFoundError('INVITATION_NOT_FOUND'); if(member.accountId!==accountId) throw new ForbiddenError('INVITATION_NOT_FOR_ACCOUNT');
-    if(member.status==='active') return member; if(member.status!=='pending' || !member.invitationExpiresAt || Date.parse(member.invitationExpiresAt)<=Date.now()) throw new ValidationError('INVITATION_EXPIRED');
+    if(member.status==="active") return member; const account = await this.requireAccountValue(accountId); if (!account.emailVerified) throw new ForbiddenError("EMAIL_NOT_VERIFIED"); if(member.status!=="pending" || !member.invitationExpiresAt || Date.parse(member.invitationExpiresAt)<=Date.now()) throw new ValidationError("INVITATION_EXPIRED");
     const accepted={...member,status:'active' as const,updatedAt:clockNow()}; await this.store.updateMembership(accepted); await this.audit(accountId,member.homeId,member.id,'membership.accepted'); return accepted;
   }
   async rejectInvitation(accountId: string, token: string): Promise<DirectoryHomeMembership> {
