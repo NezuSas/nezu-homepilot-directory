@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
+import rateLimit from '@fastify/rate-limit';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { AuthenticationError, ConflictError, DomainError, ForbiddenError, NotFoundError, ValidationError } from './domain/entities.js';
@@ -13,16 +14,36 @@ export interface DirectoryServerOptions { databasePath?: string; jwtSecret?: str
 type AuthenticatedRequest = FastifyRequest & { accountId: string };
 export function buildServer(options: DirectoryServerOptions = {}): FastifyInstance {
   const database = options.store ?? new SqliteDirectoryDatabase(options.databasePath ?? process.env.DIRECTORY_DB_PATH ?? './data/directory.db');
-  const sessions = new DirectorySessionService(options.jwtSecret ?? process.env.DIRECTORY_JWT_SECRET ?? 'development-only-secret-must-be-replaced');
+  const jwtSecret = options.jwtSecret ?? process.env.DIRECTORY_JWT_SECRET;
+  if (!jwtSecret) throw new Error('DIRECTORY_JWT_SECRET is required to start the Directory server.');
+  const sessions = new DirectorySessionService(jwtSecret);
+  const authRateLimitMax = parsePositiveInteger(process.env.DIRECTORY_AUTH_RATE_LIMIT_MAX, 10);
   const directory = new DirectoryService(database, options.invitationTtlMs);
   const app = Fastify({logger:false});
   app.register(cors,{origin:false});
   app.addHook('onClose', async () => { await database.close?.(); });
   const authenticated = async (request: FastifyRequest): Promise<void> => { const raw=request.headers.authorization; if(!raw?.startsWith('Bearer ')) throw new AuthenticationError('SESSION_REQUIRED'); (request as AuthenticatedRequest).accountId=sessions.verify(raw.slice(7)).accountId; };
-  app.setErrorHandler((error, _request, reply) => { const status=error instanceof AuthenticationError?401:error instanceof ForbiddenError?403:error instanceof NotFoundError?404:error instanceof ConflictError?409:error instanceof ValidationError?400:500; reply.code(status).send({error:error instanceof DomainError?error.code:'INTERNAL_ERROR'}); });
+  app.setErrorHandler((error, _request, reply) => {
+    const frameworkStatus = typeof (error as { statusCode?: unknown }).statusCode === 'number' ? (error as { statusCode: number }).statusCode : undefined;
+    const status = error instanceof AuthenticationError ? 401 : error instanceof ForbiddenError ? 403 : error instanceof NotFoundError ? 404 : error instanceof ConflictError ? 409 : error instanceof ValidationError ? 400 : frameworkStatus ?? 500;
+    reply.code(status).send({ error: error instanceof DomainError ? error.code : status === 429 ? 'RATE_LIMIT_EXCEEDED' : 'INTERNAL_ERROR' });
+  });
   app.get('/health',async()=>({status:'ok'}));
-  app.post('/directory/accounts',async(request,reply)=>{const body=request.body as {email?:unknown;displayName?:unknown;password?:unknown};if(typeof body?.email!=='string'||typeof body.displayName!=='string'||typeof body.password!=='string')throw new ValidationError('INVALID_BODY');const account=await directory.registerAccount({email:body.email,displayName:body.displayName,password:body.password});reply.code(201).send({id:account.id,email:account.email,displayName:account.displayName});});
-  app.post('/directory/session',async(request)=>{const body=request.body as {email?:unknown;password?:unknown};if(typeof body?.email!=='string'||typeof body.password!=='string')throw new ValidationError('INVALID_BODY');const account=await directory.authenticate({email:body.email,password:body.password});return {token:sessions.issue(account.id),account:{id:account.id,email:account.email,displayName:account.displayName}};});
+  app.register(async authRoutes => {
+    await authRoutes.register(rateLimit, { max: authRateLimitMax, timeWindow: '1 minute' });
+    authRoutes.post('/directory/accounts', async (request, reply) => {
+      const body = request.body as { email?: unknown; displayName?: unknown; password?: unknown };
+      if (typeof body?.email !== 'string' || typeof body.displayName !== 'string' || typeof body.password !== 'string') throw new ValidationError('INVALID_BODY');
+      const account = await directory.registerAccount({ email: body.email, displayName: body.displayName, password: body.password });
+      reply.code(201).send({ id: account.id, email: account.email, displayName: account.displayName });
+    });
+    authRoutes.post('/directory/session', async request => {
+      const body = request.body as { email?: unknown; password?: unknown };
+      if (typeof body?.email !== 'string' || typeof body.password !== 'string') throw new ValidationError('INVALID_BODY');
+      const account = await directory.authenticate({ email: body.email, password: body.password });
+      return { token: sessions.issue(account.id), account: { id: account.id, email: account.email, displayName: account.displayName } };
+    });
+  });
   app.get('/directory/homes',{preHandler:authenticated},async(request)=>directory.listHomes((request as AuthenticatedRequest).accountId));
   app.post('/directory/homes',{preHandler:authenticated},async(request,reply)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(typeof body?.name!=='string'||typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');const home=await directory.registerHome((request as AuthenticatedRequest).accountId,{name:body.name,edgeHostname:body.edgeHostname});reply.code(201).send(home);});
   app.get('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>directory.getHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId));
@@ -36,6 +57,13 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   app.get('/directory/homes/:homeId/audit',{preHandler:authenticated},async(request)=>directory.listAudit((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId));
   if(options.serveWeb!==false){ const here=dirname(fileURLToPath(import.meta.url)); app.register(fastifyStatic,{root:join(here,'web'),prefix:'/'}); app.get('/',async(_request,reply)=>reply.sendFile('index.html')); }
   return app;
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error('DIRECTORY_AUTH_RATE_LIMIT_MAX must be a positive integer.');
+  return parsed;
 }
 export async function buildServerFromEnvironment(): Promise<FastifyInstance> {
   if (process.env.DATABASE_URL) {

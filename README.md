@@ -28,7 +28,7 @@ Copy-Item .env.example .env
 docker compose up --build -d
 ```
 
-El servicio queda en `http://localhost:3100` y PostgreSQL se conserva en el volumen `directory-postgres`.
+El servicio queda en `http://localhost:3100` y PostgreSQL se conserva en el volumen `directory-postgres`.`n`n`DIRECTORY_AUTH_RATE_LIMIT_MAX` limita por IP los intentos de registro e inicio de sesión por minuto; su valor predeterminado es `10`.
 
 ## API
 

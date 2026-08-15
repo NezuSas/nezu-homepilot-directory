@@ -15,7 +15,11 @@ El Directorio es un servicio cloud independiente de HomePilot Edge. Mantiene cue
 7. Revocar o borrar no genera llamadas de red al Edge; si el Directorio cae, el Edge sigue siendo autónomo.
 8. Los cambios de casa y membresía se auditan sin secretos operativos.
 
-## Persistencia`n`nEl runtime de producción usa PostgreSQL mediante `DATABASE_URL`. SQLite solo se emplea en desarrollo y pruebas.`n`n## Restricciones
+## Persistencia
+
+El runtime de producción usa PostgreSQL mediante `DATABASE_URL`. SQLite solo se emplea en desarrollo y pruebas.
+
+## Restricciones
 
 - El alcance termina en el Directorio; HomePilot Edge no se modifica ni se consulta.
 - Las invitaciones se entregan por un canal seguro. No se integra proveedor de correo porque no fue especificado.
