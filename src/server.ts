@@ -4,19 +4,20 @@ import fastifyStatic from '@fastify/static';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { AuthenticationError, ConflictError, DomainError, ForbiddenError, NotFoundError, ValidationError } from './domain/entities.js';
-import { DirectoryService } from './application/DirectoryService.js';
+import { DirectoryService, type DirectoryStore } from './application/DirectoryService.js';
 import { DirectorySessionService } from './application/DirectorySessionService.js';
 import { SqliteDirectoryDatabase } from './infrastructure/SqliteDirectoryDatabase.js';
+import { PostgresDirectoryDatabase } from './infrastructure/PostgresDirectoryDatabase.js';
 
-export interface DirectoryServerOptions { databasePath?: string; jwtSecret?: string; invitationTtlMs?: number; serveWeb?: boolean; }
+export interface DirectoryServerOptions { databasePath?: string; jwtSecret?: string; invitationTtlMs?: number; serveWeb?: boolean; store?: DirectoryStore & { close?: () => void | Promise<void> }; }
 type AuthenticatedRequest = FastifyRequest & { accountId: string };
 export function buildServer(options: DirectoryServerOptions = {}): FastifyInstance {
-  const database = new SqliteDirectoryDatabase(options.databasePath ?? process.env.DIRECTORY_DB_PATH ?? './data/directory.db');
+  const database = options.store ?? new SqliteDirectoryDatabase(options.databasePath ?? process.env.DIRECTORY_DB_PATH ?? './data/directory.db');
   const sessions = new DirectorySessionService(options.jwtSecret ?? process.env.DIRECTORY_JWT_SECRET ?? 'development-only-secret-must-be-replaced');
   const directory = new DirectoryService(database, options.invitationTtlMs);
   const app = Fastify({logger:false});
   app.register(cors,{origin:false});
-  app.addHook('onClose',async()=>database.close());
+  app.addHook('onClose', async () => { await database.close?.(); });
   const authenticated = async (request: FastifyRequest): Promise<void> => { const raw=request.headers.authorization; if(!raw?.startsWith('Bearer ')) throw new AuthenticationError('SESSION_REQUIRED'); (request as AuthenticatedRequest).accountId=sessions.verify(raw.slice(7)).accountId; };
   app.setErrorHandler((error, _request, reply) => { const status=error instanceof AuthenticationError?401:error instanceof ForbiddenError?403:error instanceof NotFoundError?404:error instanceof ConflictError?409:error instanceof ValidationError?400:500; reply.code(status).send({error:error instanceof DomainError?error.code:'INTERNAL_ERROR'}); });
   app.get('/health',async()=>({status:'ok'}));
@@ -36,4 +37,14 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   if(options.serveWeb!==false){ const here=dirname(fileURLToPath(import.meta.url)); app.register(fastifyStatic,{root:join(here,'web'),prefix:'/'}); app.get('/',async(_request,reply)=>reply.sendFile('index.html')); }
   return app;
 }
-if(process.argv[1]===fileURLToPath(import.meta.url)){const app=buildServer();app.listen({host:'0.0.0.0',port:Number(process.env.PORT??3100)}).then(()=>undefined);}
+export async function buildServerFromEnvironment(): Promise<FastifyInstance> {
+  if (process.env.DATABASE_URL) {
+    const database = new PostgresDirectoryDatabase(process.env.DATABASE_URL);
+    await database.migrate();
+    return buildServer({ store: database });
+  }
+  return buildServer();
+}
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  buildServerFromEnvironment().then(app => app.listen({ host: '0.0.0.0', port: Number(process.env.PORT ?? 3100) }));
+}
