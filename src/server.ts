@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { AuthenticationError, ConflictError, DomainError, ForbiddenError, NotFoundError, ValidationError } from './domain/entities.js';
 import { DirectoryService, type DirectoryStore } from './application/DirectoryService.js';
+import { DirectorySsoIssuer } from './application/DirectorySsoIssuer.js';
 import { DirectorySessionService } from './application/DirectorySessionService.js';
 import { SqliteDirectoryDatabase } from './infrastructure/SqliteDirectoryDatabase.js';
 import { createEmailSenderFromEnvironment } from './infrastructure/EmailSenderFactory.js';
@@ -21,6 +22,7 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   const sessions = new DirectorySessionService(jwtSecret);
   const authRateLimitMax = parsePositiveInteger(process.env.DIRECTORY_AUTH_RATE_LIMIT_MAX, 10);
   const directory = new DirectoryService(database, options.invitationTtlMs, options.emailSender ?? createEmailSenderFromEnvironment(), options.publicAppUrl ?? process.env.PUBLIC_APP_URL ?? 'http://localhost:3100');
+  const ssoIssuer = DirectorySsoIssuer.fromEnvironment();
   const app = Fastify({logger:false});
   app.register(cors,{origin:false});
   app.addHook('onClose', async () => { await database.close?.(); });
@@ -31,6 +33,7 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
     reply.code(status).send({ error: error instanceof DomainError ? error.code : status === 429 ? 'RATE_LIMIT_EXCEEDED' : 'INTERNAL_ERROR' });
   });
   app.get('/health',async()=>({status:'ok'}));
+  app.get('/directory/sso/public-key', async (_request, reply) => { if (!ssoIssuer) return reply.code(503).send({ error: 'SSO_NOT_CONFIGURED' }); return { publicKey: ssoIssuer.publicKey() }; });
   app.register(async authRoutes => {
     await authRoutes.register(rateLimit, { max: authRateLimitMax, timeWindow: '1 minute' });
     authRoutes.post('/directory/accounts', async (request, reply) => {
@@ -48,7 +51,8 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   });
   app.post('/directory/password-reset/request', async (request, reply) => { const body = request.body as { email?: unknown }; if (typeof body?.email !== 'string') throw new ValidationError('INVALID_BODY'); await directory.requestPasswordReset(body.email); reply.code(202).send({ status: 'accepted' }); });
   app.post('/directory/password-reset/:token/confirm', async request => { const body = request.body as { password?: unknown }; if (typeof body?.password !== 'string') throw new ValidationError('INVALID_BODY'); await directory.confirmPasswordReset((request.params as { token: string }).token, body.password); return { status: 'confirmed' }; });
-  app.post('/directory/accounts/verify-email/:token', async request => { await directory.verifyEmail((request.params as { token: string }).token); return { status: 'verified' }; });  app.get('/directory/homes',{preHandler:authenticated},async(request)=>directory.listHomes((request as AuthenticatedRequest).accountId));
+  app.post('/directory/accounts/verify-email/:token', async request => { await directory.verifyEmail((request.params as { token: string }).token); return { status: 'verified' }; });  app.post('/directory/homes/:homeId/sso-token', { preHandler: authenticated }, async (request, reply) => { if (!ssoIssuer) return reply.code(503).send({ error: 'SSO_NOT_CONFIGURED' }); const accountId = (request as AuthenticatedRequest).accountId; const homeId = (request.params as { homeId: string }).homeId; await directory.getHome(accountId, homeId); return { token: ssoIssuer.issue(accountId, homeId) }; });
+  app.get('/directory/homes',{preHandler:authenticated},async(request)=>directory.listHomes((request as AuthenticatedRequest).accountId));
   app.post('/directory/homes',{preHandler:authenticated},async(request,reply)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(typeof body?.name!=='string'||typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');const home=await directory.registerHome((request as AuthenticatedRequest).accountId,{name:body.name,edgeHostname:body.edgeHostname});reply.code(201).send(home);});
   app.get('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>directory.getHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId));
   app.patch('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(body.name!==undefined&&typeof body.name!=='string'||body.edgeHostname!==undefined&&typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');return directory.updateHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId,{name:body.name as string | undefined,edgeHostname:body.edgeHostname as string | undefined});});

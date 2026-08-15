@@ -113,3 +113,40 @@ it('requires email verification only before creating or accepting a home members
   expect((await request(app, 'POST', `/directory/accounts/verify-email/${memberVerification}`)).statusCode).toBe(200);
   expect((await request(app, 'POST', `/directory/invitations/${invitation.token}/accept`, undefined, memberToken)).statusCode).toBe(200);
 });
+
+it('issues distinct signed 60-second SSO tokens only for active home memberships', async () => {
+  const { generateKeyPairSync, verify } = await import('node:crypto');
+  const keys = generateKeyPairSync('ed25519');
+  const privateKey = keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  const publicKey = keys.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const previous = process.env.DIRECTORY_SSO_PRIVATE_KEY;
+  process.env.DIRECTORY_SSO_PRIVATE_KEY = privateKey;
+  try {
+    const database = new SqliteDirectoryDatabase(':memory:');
+    const app = buildServer({ store: database, jwtSecret: 'test-secret-with-at-least-thirty-two-characters', serveWeb: false });
+    apps.push(app);
+    const owner = await account(app, 'sso-owner@example.com', 'Owner');
+    database.db.prepare('UPDATE directory_accounts SET email_verified = 1 WHERE email = ?').run('sso-owner@example.com');
+    const home = (await request(app, 'POST', '/directory/homes', { name: 'SSO Home', edgeHostname: 'https://sso.example.com' }, owner.token)).json() as { id: string };
+    const first = await request(app, 'POST', `/directory/homes/${home.id}/sso-token`, undefined, owner.token);
+    const second = await request(app, 'POST', `/directory/homes/${home.id}/sso-token`, undefined, owner.token);
+    expect(first.statusCode).toBe(200);
+    const [firstPayload, firstSignature] = (first.json() as { token: string }).token.split('.');
+    const payload = JSON.parse(Buffer.from(firstPayload, 'base64url').toString()) as { directoryAccountId: string; homeId: string; iat: number; exp: number; jti: string };
+    expect(payload.directoryAccountId).toBe(owner.account.id);
+    expect(payload.homeId).toBe(home.id);
+    expect(payload.exp - payload.iat).toBe(60);
+    expect(verify(null, Buffer.from(firstPayload), publicKey, Buffer.from(firstSignature, 'base64url'))).toBe(true);
+    const secondPayload = JSON.parse(Buffer.from((second.json() as { token: string }).token.split('.')[0], 'base64url').toString()) as { jti: string };
+    expect(secondPayload.jti).not.toBe(payload.jti);
+    const outsider = await account(app, 'sso-outsider@example.com', 'Outsider');
+    database.db.prepare('UPDATE directory_accounts SET email_verified = 1 WHERE email = ?').run('sso-outsider@example.com');
+    expect((await request(app, 'POST', `/directory/homes/${home.id}/sso-token`, undefined, outsider.token)).statusCode).toBe(403);
+    const publicKeyResponse = await request(app, 'GET', '/directory/sso/public-key');
+    expect(publicKeyResponse.statusCode).toBe(200);
+    expect((publicKeyResponse.json() as { publicKey: string }).publicKey).toBe(publicKey);
+  } finally {
+    if (previous === undefined) delete process.env.DIRECTORY_SSO_PRIVATE_KEY;
+    else process.env.DIRECTORY_SSO_PRIVATE_KEY = previous;
+  }
+});

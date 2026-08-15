@@ -72,3 +72,13 @@ docker compose exec -T postgres pg_dump -U homepilot_directory -d homepilot_dire
 ```
 
 Guarda el archivo fuera de la MiniPC y verifica periodicamente una restauracion en un entorno aislado. Un backup coherente requiere conservar tambien el archivo `.env` de forma segura; sin sus secretos no puede restaurarse la configuracion de produccion.
+
+## SSO con HomePilot Edge
+
+Genera el par de claves una sola vez fuera del repositorio con `npm run generate:sso-keys`. Conserva `DIRECTORY_SSO_PRIVATE_KEY` exclusivamente como secreto del Directorio. Para aprovisionar un Edge, obtiene su llave publica desde el Directorio ya desplegado:
+
+```bash
+curl https://accounts.nezuecuador.com/directory/sso/public-key
+```
+
+Configura el PEM devuelto como `DIRECTORY_SSO_PUBLIC_KEY` en ese Edge y reinicialo. El Directorio no contacta ningun Edge: el navegador transporta el token firmado, que vence a los 60 segundos.
