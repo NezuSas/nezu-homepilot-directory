@@ -44,3 +44,31 @@ El servicio queda en `http://localhost:3100` y PostgreSQL se conserva en el volu
 - `GET /directory/homes/:homeId/audit`
 
 Las invitaciones se aceptan o rechazan autenticado como su destinatario. El token se entrega por un canal seguro; la especificación no define proveedor de correo.
+
+## Correo transaccional y seguridad de cuenta
+
+El Directorio usa `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` y `SMTP_FROM` para enviar los enlaces de verificacion, invitacion y recuperacion. `PUBLIC_APP_URL` debe ser la URL publica real del Directorio: los enlaces se construyen exclusivamente con esa variable. En desarrollo, sin variables SMTP, se utiliza un emisor no-op para no enviar correo real.
+
+Una cuenta nueva queda sin verificar; puede iniciar sesion, pero la interfaz comunica que debe verificar su correo. Los tokens se generan criptograficamente, se guarda solamente su hash, son de un solo uso y vencen a la hora. Los tokens de recuperacion actualizan la contrasena; los JWT ya emitidos siguen vigentes hasta su expiracion normal de 12 horas, porque no existe aun una lista de revocacion de sesiones.
+
+Si SMTP falla, la invitacion o token ya persistido no se revierte: se conserva valido y puede reenviarse mediante un flujo operativo posterior. Esta decision evita dejar una invitacion creada parcialmente.
+
+## Despliegue con dominio propio
+
+1. Copia `.env.example` a `.env` y reemplaza todos los valores de ejemplo con secretos reales.
+2. Configura `PUBLIC_APP_URL` con el hostname publico real del Directorio.
+3. Ejecuta `docker compose up --build -d`.
+4. Expone el puerto local `3100` mediante un reverse proxy o un Cloudflare Tunnel configurado por un administrador. El proxy/tunel debe dirigir HTTPS publico al servicio `http://localhost:3100` y conservar ese hostname en `PUBLIC_APP_URL`.
+5. Comprueba `https://tu-hostname/health` y revisa los logs con `docker compose logs -f homepilot-directory`.
+
+No se registran dominios, tunnels ni cuentas de proveedores desde este repositorio.
+
+## Backup de produccion
+
+El estado persistente del Directorio es PostgreSQL en el volumen `directory-postgres`. Realiza un backup diario y antes de cualquier actualizacion:
+
+```bash
+docker compose exec -T postgres pg_dump -U homepilot_directory -d homepilot_directory > directory-$(date +%F).sql
+```
+
+Guarda el archivo fuera de la MiniPC y verifica periodicamente una restauracion en un entorno aislado. Un backup coherente requiere conservar tambien el archivo `.env` de forma segura; sin sus secretos no puede restaurarse la configuracion de produccion.

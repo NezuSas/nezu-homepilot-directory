@@ -8,3 +8,7 @@
 - **Navegación:** el selector utiliza `window.location.assign(edgeHostname)`. No adjunta token, cabeceras ni credenciales del Directorio, por lo que no constituye SSO.
 
 - **Privacidad de invitaciones:** el flujo actual requiere que la persona ya tenga una cuenta para emitir un token. Por tanto, una respuesta INVITEE_NOT_FOUND revela la ausencia de esa cuenta al propietario autenticado. Se documenta como limitación; no se cambia el flujo porque la especificación no define invitaciones previas al registro ni proveedor de correo.
+
+- **Correo transaccional:** `EmailSender` es un puerto; SMTP se configura por entorno y los tests usan un emisor en memoria. La persistencia de invitaciones y tokens precede al envio: un fallo SMTP no revierte la operacion, evitando inconsistencias. La cuenta puede iniciar sesion sin correo verificado, con aviso de UI, para no bloquear el flujo de alta mientras se completa la verificación.
+- **Recuperacion de contrasena:** los tokens se guardan solo como SHA-256, expiran en una hora y se consumen atómicamente. El endpoint de solicitud responde igual si el correo existe o no, evitando enumeracion.
+- **Revocacion de sesion:** cambiar contrasena no invalida JWT ya emitidos; estos expiran en 12 horas. Se documenta esta limitacion para no introducir un sistema de revocacion fuera del alcance actual.

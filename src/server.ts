@@ -8,9 +8,11 @@ import { AuthenticationError, ConflictError, DomainError, ForbiddenError, NotFou
 import { DirectoryService, type DirectoryStore } from './application/DirectoryService.js';
 import { DirectorySessionService } from './application/DirectorySessionService.js';
 import { SqliteDirectoryDatabase } from './infrastructure/SqliteDirectoryDatabase.js';
+import { createEmailSenderFromEnvironment } from './infrastructure/EmailSenderFactory.js';
+import type { EmailSender } from './application/EmailSender.js';
 import { PostgresDirectoryDatabase } from './infrastructure/PostgresDirectoryDatabase.js';
 
-export interface DirectoryServerOptions { databasePath?: string; jwtSecret?: string; invitationTtlMs?: number; serveWeb?: boolean; store?: DirectoryStore & { close?: () => void | Promise<void> }; }
+export interface DirectoryServerOptions { databasePath?: string; jwtSecret?: string; invitationTtlMs?: number; serveWeb?: boolean; emailSender?: EmailSender; publicAppUrl?: string; store?: DirectoryStore & { close?: () => void | Promise<void> }; }
 type AuthenticatedRequest = FastifyRequest & { accountId: string };
 export function buildServer(options: DirectoryServerOptions = {}): FastifyInstance {
   const database = options.store ?? new SqliteDirectoryDatabase(options.databasePath ?? process.env.DIRECTORY_DB_PATH ?? './data/directory.db');
@@ -18,7 +20,7 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   if (!jwtSecret) throw new Error('DIRECTORY_JWT_SECRET is required to start the Directory server.');
   const sessions = new DirectorySessionService(jwtSecret);
   const authRateLimitMax = parsePositiveInteger(process.env.DIRECTORY_AUTH_RATE_LIMIT_MAX, 10);
-  const directory = new DirectoryService(database, options.invitationTtlMs);
+  const directory = new DirectoryService(database, options.invitationTtlMs, options.emailSender ?? createEmailSenderFromEnvironment(), options.publicAppUrl ?? process.env.PUBLIC_APP_URL ?? 'http://localhost:3100');
   const app = Fastify({logger:false});
   app.register(cors,{origin:false});
   app.addHook('onClose', async () => { await database.close?.(); });
@@ -44,7 +46,9 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
       return { token: sessions.issue(account.id), account: { id: account.id, email: account.email, displayName: account.displayName } };
     });
   });
-  app.get('/directory/homes',{preHandler:authenticated},async(request)=>directory.listHomes((request as AuthenticatedRequest).accountId));
+  app.post('/directory/password-reset/request', async (request, reply) => { const body = request.body as { email?: unknown }; if (typeof body?.email !== 'string') throw new ValidationError('INVALID_BODY'); await directory.requestPasswordReset(body.email); reply.code(202).send({ status: 'accepted' }); });
+  app.post('/directory/password-reset/:token/confirm', async request => { const body = request.body as { password?: unknown }; if (typeof body?.password !== 'string') throw new ValidationError('INVALID_BODY'); await directory.confirmPasswordReset((request.params as { token: string }).token, body.password); return { status: 'confirmed' }; });
+  app.post('/directory/accounts/verify-email/:token', async request => { await directory.verifyEmail((request.params as { token: string }).token); return { status: 'verified' }; });  app.get('/directory/homes',{preHandler:authenticated},async(request)=>directory.listHomes((request as AuthenticatedRequest).accountId));
   app.post('/directory/homes',{preHandler:authenticated},async(request,reply)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(typeof body?.name!=='string'||typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');const home=await directory.registerHome((request as AuthenticatedRequest).accountId,{name:body.name,edgeHostname:body.edgeHostname});reply.code(201).send(home);});
   app.get('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>directory.getHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId));
   app.patch('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(body.name!==undefined&&typeof body.name!=='string'||body.edgeHostname!==undefined&&typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');return directory.updateHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId,{name:body.name as string | undefined,edgeHostname:body.edgeHostname as string | undefined});});

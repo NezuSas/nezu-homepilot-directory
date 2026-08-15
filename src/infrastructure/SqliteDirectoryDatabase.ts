@@ -2,24 +2,29 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AccountRepository, AuditRepository, HomeMembershipRepository, HomeRepository } from '../domain/repositories.js';
-import type { AuditEvent, DirectoryAccount, DirectoryHome, DirectoryHomeMembership, MembershipStatus } from '../domain/entities.js';
+import type { AccountTokenPurpose, AuditEvent, DirectoryAccount, DirectoryAccountToken, DirectoryHome, DirectoryHomeMembership, MembershipStatus } from '../domain/entities.js';
 
 export class SqliteDirectoryDatabase {
   readonly db: Database.Database;
   constructor(path: string) { if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true }); this.db = new Database(path); this.db.pragma('foreign_keys = ON'); this.migrate(); }
   private migrate(): void {
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS directory_accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS directory_accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, email_verified INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS directory_homes (id TEXT PRIMARY KEY, name TEXT NOT NULL, edge_hostname TEXT NOT NULL, owner_account_id TEXT NOT NULL REFERENCES directory_accounts(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS directory_home_memberships (id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES directory_homes(id) ON DELETE CASCADE, account_id TEXT NOT NULL REFERENCES directory_accounts(id), role TEXT NOT NULL CHECK(role IN ('owner','member')), status TEXT NOT NULL CHECK(status IN ('pending','active','revoked')), invited_by_account_id TEXT REFERENCES directory_accounts(id), invitation_token_hash TEXT UNIQUE, invitation_expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(home_id, account_id));
       CREATE INDEX IF NOT EXISTS idx_memberships_account_active ON directory_home_memberships(account_id, status);
       CREATE TABLE IF NOT EXISTS directory_audit_events (id TEXT PRIMARY KEY, actor_account_id TEXT NOT NULL, home_id TEXT, membership_id TEXT, action TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS idx_audit_home_created ON directory_audit_events(home_id, created_at DESC);
+      CREATE TABLE IF NOT EXISTS directory_account_tokens (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES directory_accounts(id) ON DELETE CASCADE, purpose TEXT NOT NULL CHECK(purpose IN ('email_verify','password_reset')), token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL);
     `);
   }
-  async createAccount(account: DirectoryAccount): Promise<void> { this.db.prepare('INSERT INTO directory_accounts VALUES (?, ?, ?, ?, ?)').run(account.id, account.email, account.passwordHash, account.displayName, account.createdAt); }
+  async createAccount(account: DirectoryAccount): Promise<void> { this.db.prepare('INSERT INTO directory_accounts (id,email,password_hash,display_name,created_at) VALUES (?, ?, ?, ?, ?)').run(account.id, account.email, account.passwordHash, account.displayName, account.createdAt); }
   async findAccountByEmail(email: string): Promise<DirectoryAccount | null> { const row = this.db.prepare('SELECT * FROM directory_accounts WHERE email = ?').get(email) as AccountRow | undefined; return row ? account(row) : null; }
   async findAccountById(id: string): Promise<DirectoryAccount | null> { const row = this.db.prepare('SELECT * FROM directory_accounts WHERE id = ?').get(id) as AccountRow | undefined; return row ? account(row) : null; }
+  async updateAccount(value: DirectoryAccount): Promise<void> { this.db.prepare('UPDATE directory_accounts SET password_hash=?,display_name=?,email_verified=? WHERE id=?').run(value.passwordHash,value.displayName,value.emailVerified?1:0,value.id); }
+  async createAccountToken(value: DirectoryAccountToken): Promise<void> { this.db.prepare('INSERT INTO directory_account_tokens VALUES (?, ?, ?, ?, ?, ?, ?)').run(value.id,value.accountId,value.purpose,value.tokenHash,value.expiresAt,value.usedAt,value.createdAt); }
+  async findAccountTokenByHash(hash:string): Promise<DirectoryAccountToken|null> { const row=this.db.prepare('SELECT * FROM directory_account_tokens WHERE token_hash=?').get(hash) as TokenRow|undefined; return row?token(row):null; }
+  async consumeAccountToken(id:string, now:string): Promise<boolean> { return this.db.prepare('UPDATE directory_account_tokens SET used_at=? WHERE id=? AND used_at IS NULL AND expires_at>?').run(now,id,now).changes===1; }
   async createHome(home: DirectoryHome): Promise<void> { this.db.prepare('INSERT INTO directory_homes VALUES (?, ?, ?, ?, ?, ?)').run(home.id, home.name, home.edgeHostname, home.ownerAccountId, home.createdAt, home.updatedAt); }
   async findHomeById(id: string): Promise<DirectoryHome | null> { const row = this.db.prepare('SELECT * FROM directory_homes WHERE id = ?').get(id) as HomeRow | undefined; return row ? home(row) : null; }
   async updateHome(homeValue: DirectoryHome): Promise<void> { this.db.prepare('UPDATE directory_homes SET name=?, edge_hostname=?, owner_account_id=?, updated_at=? WHERE id=?').run(homeValue.name, homeValue.edgeHostname, homeValue.ownerAccountId, homeValue.updatedAt, homeValue.id); }
@@ -35,11 +40,14 @@ export class SqliteDirectoryDatabase {
   async listForHome(homeId: string): Promise<AuditEvent[]> { return (this.db.prepare('SELECT * FROM directory_audit_events WHERE home_id=? ORDER BY created_at DESC').all(homeId) as AuditRow[]).map(row=>({id:row.id,actorAccountId:row.actor_account_id,homeId:row.home_id,membershipId:row.membership_id,action:row.action,createdAt:row.created_at})); }
   close(): void { this.db.close(); }
 }
-interface AccountRow { id:string; email:string; password_hash:string; display_name:string; created_at:string; }
+interface AccountRow { id:string; email:string; password_hash:string; display_name:string; email_verified?:number; created_at:string; }
+interface TokenRow { id:string;account_id:string;purpose:string;token_hash:string;expires_at:string;used_at:string|null;created_at:string; }
 interface HomeRow { id:string; name:string; edge_hostname:string; owner_account_id:string; created_at:string; updated_at:string; }
 interface MembershipRow { id:string; home_id:string; account_id:string; role:string; status:string; invited_by_account_id:string|null; invitation_token_hash:string|null; invitation_expires_at:string|null; created_at:string; updated_at:string; }
 interface JoinRow { h_id:string;h_name:string;h_edge_hostname:string;h_owner_account_id:string;h_created_at:string;h_updated_at:string;m_id:string;m_home_id:string;m_account_id:string;m_role:string;m_status:string;m_invited_by_account_id:string|null;m_invitation_token_hash:string|null;m_invitation_expires_at:string|null;m_created_at:string;m_updated_at:string; }
 interface AuditRow { id:string;actor_account_id:string;home_id:string|null;membership_id:string|null;action:string;created_at:string; }
-const account=(r:AccountRow):DirectoryAccount=>({id:r.id,email:r.email,passwordHash:r.password_hash,displayName:r.display_name,createdAt:r.created_at});
+const account=(r:AccountRow):DirectoryAccount=>({id:r.id,email:r.email,passwordHash:r.password_hash,displayName:r.display_name,emailVerified:Boolean(r.email_verified),createdAt:r.created_at});
 const home=(r:HomeRow):DirectoryHome=>({id:r.id,name:r.name,edgeHostname:r.edge_hostname,ownerAccountId:r.owner_account_id,createdAt:r.created_at,updatedAt:r.updated_at});
 const membership=(r:MembershipRow):DirectoryHomeMembership=>({id:r.id,homeId:r.home_id,accountId:r.account_id,role:r.role as 'owner'|'member',status:r.status as MembershipStatus,invitedByAccountId:r.invited_by_account_id,invitationTokenHash:r.invitation_token_hash,invitationExpiresAt:r.invitation_expires_at,createdAt:r.created_at,updatedAt:r.updated_at});
+
+const token=(r:TokenRow):DirectoryAccountToken=>({id:r.id,accountId:r.account_id,purpose:r.purpose as AccountTokenPurpose,tokenHash:r.token_hash,expiresAt:r.expires_at,usedAt:r.used_at,createdAt:r.created_at});

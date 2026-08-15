@@ -1,23 +1,27 @@
 import { Pool } from 'pg';
 import type { DirectoryStore } from '../application/DirectoryService.js';
-import type { AuditEvent, DirectoryAccount, DirectoryHome, DirectoryHomeMembership, MembershipStatus } from '../domain/entities.js';
+import type { AccountTokenPurpose, AuditEvent, DirectoryAccount, DirectoryAccountToken, DirectoryHome, DirectoryHomeMembership, MembershipStatus } from '../domain/entities.js';
 
 export class PostgresDirectoryDatabase implements DirectoryStore {
   private readonly pool: Pool;
   constructor(connectionString: string) { this.pool = new Pool({ connectionString }); }
   async migrate(): Promise<void> {
     await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS directory_accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL);
+      CREATE TABLE IF NOT EXISTS directory_accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, email_verified BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL);
       CREATE TABLE IF NOT EXISTS directory_homes (id TEXT PRIMARY KEY, name TEXT NOT NULL, edge_hostname TEXT NOT NULL, owner_account_id TEXT NOT NULL REFERENCES directory_accounts(id), created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL);
       CREATE TABLE IF NOT EXISTS directory_home_memberships (id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES directory_homes(id) ON DELETE CASCADE, account_id TEXT NOT NULL REFERENCES directory_accounts(id), role TEXT NOT NULL CHECK(role IN ('owner','member')), status TEXT NOT NULL CHECK(status IN ('pending','active','revoked')), invited_by_account_id TEXT REFERENCES directory_accounts(id), invitation_token_hash TEXT UNIQUE, invitation_expires_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, UNIQUE(home_id, account_id));
       CREATE INDEX IF NOT EXISTS idx_memberships_account_active ON directory_home_memberships(account_id, status);
       CREATE TABLE IF NOT EXISTS directory_audit_events (id TEXT PRIMARY KEY, actor_account_id TEXT NOT NULL, home_id TEXT, membership_id TEXT, action TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL);
-      CREATE INDEX IF NOT EXISTS idx_audit_home_created ON directory_audit_events(home_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_home_created ON directory_audit_events(home_id, created_at DESC); CREATE TABLE IF NOT EXISTS directory_account_tokens (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES directory_accounts(id) ON DELETE CASCADE, purpose TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL); ALTER TABLE directory_accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
     `);
   }
-  async createAccount(value: DirectoryAccount): Promise<void> { await this.pool.query('INSERT INTO directory_accounts (id,email,password_hash,display_name,created_at) VALUES ($1,$2,$3,$4,$5)', [value.id,value.email,value.passwordHash,value.displayName,value.createdAt]); }
-  async findAccountByEmail(email: string): Promise<DirectoryAccount | null> { return mapAccount((await this.pool.query('SELECT * FROM directory_accounts WHERE email=$1',[email])).rows[0]); }
-  async findAccountById(id: string): Promise<DirectoryAccount | null> { return mapAccount((await this.pool.query('SELECT * FROM directory_accounts WHERE id=$1',[id])).rows[0]); }
+  async createAccount(value: DirectoryAccount): Promise<void> { await this.pool.query("INSERT INTO directory_accounts (id,email,password_hash,display_name,email_verified,created_at) VALUES ($1,$2,$3,$4,$5,$6)", [value.id, value.email, value.passwordHash, value.displayName, value.emailVerified, value.createdAt]); }
+  async findAccountByEmail(email: string): Promise<DirectoryAccount | null> { return mapAccount((await this.pool.query("SELECT * FROM directory_accounts WHERE email=$1", [email])).rows[0]); }
+  async findAccountById(id: string): Promise<DirectoryAccount | null> { return mapAccount((await this.pool.query("SELECT * FROM directory_accounts WHERE id=$1", [id])).rows[0]); }
+  async updateAccount(value: DirectoryAccount): Promise<void> { await this.pool.query("UPDATE directory_accounts SET password_hash=$1,display_name=$2,email_verified=$3 WHERE id=$4", [value.passwordHash, value.displayName, value.emailVerified, value.id]); }
+  async createAccountToken(value: DirectoryAccountToken): Promise<void> { await this.pool.query("INSERT INTO directory_account_tokens (id,account_id,purpose,token_hash,expires_at,used_at,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [value.id, value.accountId, value.purpose, value.tokenHash, value.expiresAt, value.usedAt, value.createdAt]); }
+  async findAccountTokenByHash(hash: string): Promise<DirectoryAccountToken | null> { const row = (await this.pool.query("SELECT * FROM directory_account_tokens WHERE token_hash=$1", [hash])).rows[0] as Row | undefined; return row ? { id: String(row.id), accountId: String(row.account_id), purpose: String(row.purpose) as AccountTokenPurpose, tokenHash: String(row.token_hash), expiresAt: iso(row.expires_at), usedAt: row.used_at ? iso(row.used_at) : null, createdAt: iso(row.created_at) } : null; }
+  async consumeAccountToken(id: string, now: string): Promise<boolean> { return (await this.pool.query("UPDATE directory_account_tokens SET used_at=$1 WHERE id=$2 AND used_at IS NULL AND expires_at>$1", [now, id])).rowCount === 1; }
   async createHome(value: DirectoryHome): Promise<void> { await this.pool.query('INSERT INTO directory_homes (id,name,edge_hostname,owner_account_id,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6)',[value.id,value.name,value.edgeHostname,value.ownerAccountId,value.createdAt,value.updatedAt]); }
   async findHomeById(id: string): Promise<DirectoryHome | null> { return mapHome((await this.pool.query('SELECT * FROM directory_homes WHERE id=$1',[id])).rows[0]); }
   async updateHome(value: DirectoryHome): Promise<void> { await this.pool.query('UPDATE directory_homes SET name=$1,edge_hostname=$2,owner_account_id=$3,updated_at=$4 WHERE id=$5',[value.name,value.edgeHostname,value.ownerAccountId,value.updatedAt,value.id]); }
@@ -34,7 +38,7 @@ export class PostgresDirectoryDatabase implements DirectoryStore {
 }
 type Row=Record<string,unknown>;
 const iso=(value:unknown):string=>value instanceof Date?value.toISOString():String(value);
-const mapAccount=(row:Row|undefined):DirectoryAccount|null=>row?{id:String(row.id),email:String(row.email),passwordHash:String(row.password_hash),displayName:String(row.display_name),createdAt:iso(row.created_at)}:null;
+const mapAccount=(row:Row|undefined):DirectoryAccount|null=>row?{id:String(row.id),email:String(row.email),passwordHash:String(row.password_hash),displayName:String(row.display_name),emailVerified:Boolean(row.email_verified),createdAt:iso(row.created_at)}:null;
 const mapHome=(row:Row|undefined):DirectoryHome|null=>row?{id:String(row.id),name:String(row.name),edgeHostname:String(row.edge_hostname),ownerAccountId:String(row.owner_account_id),createdAt:iso(row.created_at),updatedAt:iso(row.updated_at)}:null;
 const mapMembership=(row:Row|undefined):DirectoryHomeMembership|null=>row?mapMembershipRequired(row):null;
 const mapMembershipRequired=(row:Row):DirectoryHomeMembership=>({id:String(row.id),homeId:String(row.home_id),accountId:String(row.account_id),role:String(row.role) as 'owner'|'member',status:String(row.status) as MembershipStatus,invitedByAccountId:row.invited_by_account_id===null?null:String(row.invited_by_account_id),invitationTokenHash:row.invitation_token_hash===null?null:String(row.invitation_token_hash),invitationExpiresAt:row.invitation_expires_at===null?null:iso(row.invitation_expires_at),createdAt:iso(row.created_at),updatedAt:iso(row.updated_at)});

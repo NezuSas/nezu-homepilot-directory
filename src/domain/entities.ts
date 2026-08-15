@@ -3,7 +3,9 @@ import { randomUUID } from 'node:crypto';
 export type MembershipRole = 'owner' | 'member';
 export type MembershipStatus = 'pending' | 'active' | 'revoked';
 
-export interface DirectoryAccount { id: string; email: string; passwordHash: string; displayName: string; createdAt: string; }
+export interface DirectoryAccount { id: string; email: string; passwordHash: string; displayName: string; emailVerified: boolean; createdAt: string; }
+export type AccountTokenPurpose = 'email_verify' | 'password_reset';
+export interface DirectoryAccountToken { id: string; accountId: string; purpose: AccountTokenPurpose; tokenHash: string; expiresAt: string; usedAt: string | null; createdAt: string; }
 export interface DirectoryHome { id: string; name: string; edgeHostname: string; ownerAccountId: string; createdAt: string; updatedAt: string; }
 export interface DirectoryHomeMembership { id: string; homeId: string; accountId: string; role: MembershipRole; status: MembershipStatus; invitedByAccountId: string | null; invitationTokenHash: string | null; invitationExpiresAt: string | null; createdAt: string; updatedAt: string; }
 export interface AuditEvent { id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string; }

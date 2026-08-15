@@ -22,6 +22,13 @@ services:
       PORT: "3100"
       DIRECTORY_JWT_SECRET: ${DIRECTORY_JWT_SECRET:?Set DIRECTORY_JWT_SECRET in .env}
       DATABASE_URL: postgresql://homepilot_directory:${DIRECTORY_POSTGRES_PASSWORD}@postgres:5432/homepilot_directory
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:?Set PUBLIC_APP_URL in .env}
+      SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST in .env}
+      SMTP_PORT: ${SMTP_PORT:?Set SMTP_PORT in .env}
+      SMTP_USER: ${SMTP_USER:?Set SMTP_USER in .env}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:?Set SMTP_PASSWORD in .env}
+      SMTP_FROM: ${SMTP_FROM:?Set SMTP_FROM in .env}
+      DIRECTORY_AUTH_RATE_LIMIT_MAX: ${DIRECTORY_AUTH_RATE_LIMIT_MAX:-10}
     depends_on:
       postgres:
         condition: service_healthy

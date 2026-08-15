@@ -41,3 +41,45 @@ describe('Directory API', () => {
     expect(audit.map(event => event.action)).toEqual(expect.arrayContaining(['home.created', 'membership.invited']));
   });  it('rejects an invitation without granting access', async () => { const app=createApp(); const owner=await account(app,'owner@example.com','Owner'); const member=await account(app,'member@example.com','Member'); const home=(await request(app,'POST','/directory/homes',{name:'Casa',edgeHostname:'https://casa.example.com'},owner.token)).json() as {id:string}; const invitation=(await request(app,'POST',`/directory/homes/${home.id}/invitations`,{email:'member@example.com'},owner.token)).json() as {token:string}; expect((await request(app,'POST',`/directory/invitations/${invitation.token}/reject`,undefined,member.token)).statusCode).toBe(200); expect((await request(app,'GET','/directory/homes',undefined,member.token)).json()).toEqual([]); });
 });
+
+it('sends verification, invitation and password reset links without exposing reset enumeration', async () => {
+  const { InMemoryEmailSender } = await import('../application/EmailSender.js');
+  const { SqliteDirectoryDatabase } = await import('../infrastructure/SqliteDirectoryDatabase.js');
+  const sender = new InMemoryEmailSender();
+  const database = new SqliteDirectoryDatabase(':memory:');
+  const app = buildServer({ store: database, jwtSecret: 'test-secret-with-at-least-thirty-two-characters', serveWeb: false, emailSender: sender, publicAppUrl: 'https://directory.example' });
+  apps.push(app);
+  const user = await account(app, 'reset@example.com', 'Reset');
+  expect(sender.sent[0]?.text).toMatch(/^https:\/\/directory\.example\/\?verify=/);
+  const verificationToken = new URL(sender.sent[0]!.text).searchParams.get('verify')!;
+  expect((await request(app, 'POST', `/directory/accounts/verify-email/${verificationToken}`)).statusCode).toBe(200);
+  expect((await request(app, 'POST', `/directory/accounts/verify-email/${verificationToken}`)).statusCode).toBe(400);
+  expect((await request(app, 'POST', '/directory/password-reset/request', { email: 'missing@example.com' })).statusCode).toBe(202);
+  expect((await request(app, 'POST', '/directory/password-reset/request', { email: 'reset@example.com' })).statusCode).toBe(202);
+  const resetToken = new URL(sender.sent.at(-1)!.text).searchParams.get('reset')!;
+  expect((await request(app, 'POST', `/directory/password-reset/${resetToken}/confirm`, { password: 'new-password-123' })).statusCode).toBe(200);
+  expect((await request(app, 'POST', '/directory/session', { email: 'reset@example.com', password: 'password123' })).statusCode).toBe(401);
+  expect((await request(app, 'POST', '/directory/session', { email: 'reset@example.com', password: 'new-password-123' })).statusCode).toBe(200);
+  expect((await request(app, 'POST', `/directory/password-reset/${resetToken}/confirm`, { password: 'another-password-123' })).statusCode).toBe(400);
+  const home = (await request(app, 'POST', '/directory/homes', { name: 'Casa Reset', edgeHostname: 'https://reset.example.com' }, user.token)).json() as { id: string };
+  const invitee = await account(app, 'invitee@example.com', 'Invitee');
+  const invitation = (await request(app, 'POST', `/directory/homes/${home.id}/invitations`, { email: 'invitee@example.com' }, user.token)).json() as { token: string };
+  expect(sender.sent.at(-1)?.text).toBe(`https://directory.example/?invite=${invitation.token}`);
+  expect(invitee.token).toBeTruthy();
+});
+
+it('rejects an expired password reset token', async () => {
+  const { InMemoryEmailSender } = await import('../application/EmailSender.js');
+  const { SqliteDirectoryDatabase } = await import('../infrastructure/SqliteDirectoryDatabase.js');
+  const sender = new InMemoryEmailSender();
+  const database = new SqliteDirectoryDatabase(':memory:');
+  const app = buildServer({ store: database, jwtSecret: 'test-secret-with-at-least-thirty-two-characters', serveWeb: false, emailSender: sender });
+  apps.push(app);
+  await account(app, 'expired@example.com', 'Expired');
+  await request(app, 'POST', '/directory/password-reset/request', { email: 'expired@example.com' });
+  const resetToken = new URL(sender.sent.at(-1)!.text).searchParams.get('reset')!;
+  database.db.prepare("UPDATE directory_account_tokens SET expires_at = ? WHERE purpose = 'password_reset'").run(new Date(Date.now() - 1000).toISOString());
+  const response = await request(app, 'POST', `/directory/password-reset/${resetToken}/confirm`, { password: 'new-password-123' });
+  expect(response.statusCode).toBe(400);
+  expect(response.json()).toEqual({ error: 'TOKEN_EXPIRED' });
+});

@@ -28,3 +28,39 @@ q('#invite-form').onsubmit=async(event)=>{event.preventDefault();if(!state.selec
 q('#logout').onclick=()=>{localStorage.removeItem('directory_token');state.token=null;state.selectedHome=null;q('#homes').hidden=true;q('#auth').hidden=false;q('#logout').hidden=true;};document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>setTab(button.dataset.tab));
 const escapeHtml=(value)=>String(value).replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 if(state.token)loadHomes().catch(()=>q('#logout').click());
+
+const query = new URLSearchParams(window.location.search);
+const recovery = document.createElement('form');
+recovery.id = 'password-reset-request';
+recovery.innerHTML = '<label>Recuperar contrasena<input name="email" type="email" required></label><button>Enviar enlace de recuperacion</button>';
+q('#login').insertAdjacentElement('afterend', recovery);
+recovery.onsubmit = async event => {
+  event.preventDefault();
+  try {
+    await api('/directory/password-reset/request', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(recovery))) });
+    recovery.reset();
+    notice('Si existe una cuenta, enviamos un enlace de recuperacion.');
+  } catch (error) { notice(error.message); }
+};
+
+if (query.has('verify')) {
+  api(`/directory/accounts/verify-email/${encodeURIComponent(query.get('verify'))}`, { method: 'POST' })
+    .then(() => notice('Correo verificado. Ya puedes continuar.'))
+    .catch(error => notice(error.message));
+}
+if (query.has('reset')) {
+  q('#auth').hidden = false;
+  const reset = document.createElement('form');
+  reset.id = 'password-reset-confirm';
+  reset.innerHTML = '<label>Nueva contrasena<input name="password" type="password" minlength="8" required></label><button>Guardar nueva contrasena</button>';
+  recovery.insertAdjacentElement('afterend', reset);
+  reset.onsubmit = async event => {
+    event.preventDefault();
+    try {
+      await api(`/directory/password-reset/${encodeURIComponent(query.get('reset'))}/confirm`, { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(reset))) });
+      reset.remove();
+      history.replaceState({}, '', '/');
+      notice('Contrasena actualizada. Ahora puedes ingresar.');
+    } catch (error) { notice(error.message); }
+  };
+}
