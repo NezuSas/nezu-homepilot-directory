@@ -1,0 +1,15 @@
+services:
+  homepilot-directory:
+    build: .
+    ports:
+      - "3100:3100"
+    environment:
+      PORT: "3100"
+      DIRECTORY_JWT_SECRET: ${DIRECTORY_JWT_SECRET:?Set DIRECTORY_JWT_SECRET in .env}
+      DIRECTORY_DB_PATH: /var/lib/homepilot-directory/directory.db
+    volumes:
+      - directory-data:/var/lib/homepilot-directory
+    restart: unless-stopped
+
+volumes:
+  directory-data:
