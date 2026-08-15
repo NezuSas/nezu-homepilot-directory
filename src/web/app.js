@@ -10,7 +10,7 @@ async function selectHome(home){state.selectedHome=home;q('#owner-panel').hidden
 q('#login').onsubmit=async(event)=>{event.preventDefault();const data=Object.fromEntries(new FormData(event.currentTarget));try{const result=await api('/directory/session',{method:'POST',body:JSON.stringify(data)});state.token=result.token;localStorage.setItem('directory_token',result.token);await loadHomes();}catch(error){notice(error.message);}};
 q('#register').onsubmit=async(event)=>{event.preventDefault();const data=Object.fromEntries(new FormData(event.currentTarget));try{await api('/directory/accounts',{method:'POST',body:JSON.stringify(data)});setTab('login');notice('Cuenta creada. Ahora inicia sesión.');}catch(error){notice(error.message);}};
 q('#new-home').onclick=()=>q('#home-form').hidden=!q('#home-form').hidden;
-q('#home-form').onsubmit=async(event)=>{event.preventDefault();try{await api('/directory/homes',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(event.currentTarget)))});event.currentTarget.reset();event.currentTarget.hidden=true;await loadHomes();notice('Casa registrada.');}catch(error){notice(error.message);}};
+q('#home-form').onsubmit=async(event)=>{event.preventDefault();const form=event.currentTarget;try{await api('/directory/homes',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(form)))});form.reset();form.hidden=true;await loadHomes();notice('Casa registrada.');}catch(error){notice(error.message);}};
 async function respondToInvitation(decision) {
   const form = q('#invitation-response');
   const token = new FormData(form).get('token');
@@ -25,7 +25,7 @@ async function respondToInvitation(decision) {
   }
 }q('#invitation-response').onsubmit=async(event)=>{event.preventDefault();await respondToInvitation('accept');};
 q('#reject-invitation').onclick=()=>respondToInvitation('reject');
-q('#invite-form').onsubmit=async(event)=>{event.preventDefault();if(!state.selectedHome)return;try{const invitation=await api(`/directory/homes/${state.selectedHome.id}/invitations`,{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(event.currentTarget)))});q('#invite-result').textContent=`Invitación creada. Token para entregar de forma segura: ${invitation.token}`;event.currentTarget.reset();await selectHome(state.selectedHome);}catch(error){notice(error.message);}};
+q('#invite-form').onsubmit=async(event)=>{event.preventDefault();if(!state.selectedHome)return;const form=event.currentTarget;try{const invitation=await api(`/directory/homes/${state.selectedHome.id}/invitations`,{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(form)))});q('#invite-result').textContent=`Invitación creada. Token para entregar de forma segura: ${invitation.token}`;form.reset();await selectHome(state.selectedHome);}catch(error){notice(error.message);}};
 q('#logout').onclick=()=>{localStorage.removeItem('directory_token');state.token=null;state.selectedHome=null;q('#homes').hidden=true;q('#auth').hidden=false;q('#logout').hidden=true;};document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>setTab(button.dataset.tab));
 const escapeHtml=(value)=>String(value).replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 if(state.token)loadHomes().catch(()=>q('#logout').click());
