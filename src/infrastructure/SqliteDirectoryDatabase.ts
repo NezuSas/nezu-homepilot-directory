@@ -1,10 +1,12 @@
 import Database from 'better-sqlite3';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { AccountRepository, AuditRepository, HomeMembershipRepository, HomeRepository } from '../domain/repositories.js';
 import type { AuditEvent, DirectoryAccount, DirectoryHome, DirectoryHomeMembership, MembershipStatus } from '../domain/entities.js';
 
 export class SqliteDirectoryDatabase {
   readonly db: Database.Database;
-  constructor(path: string) { this.db = new Database(path); this.db.pragma('foreign_keys = ON'); this.migrate(); }
+  constructor(path: string) { if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true }); this.db = new Database(path); this.db.pragma('foreign_keys = ON'); this.migrate(); }
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS directory_accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, created_at TEXT NOT NULL);
