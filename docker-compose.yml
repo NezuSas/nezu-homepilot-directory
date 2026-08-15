@@ -29,6 +29,7 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:?Set SMTP_PASSWORD in .env}
       SMTP_FROM: ${SMTP_FROM:?Set SMTP_FROM in .env}
       DIRECTORY_AUTH_RATE_LIMIT_MAX: ${DIRECTORY_AUTH_RATE_LIMIT_MAX:-10}
+      DIRECTORY_SSO_PRIVATE_KEY: ${DIRECTORY_SSO_PRIVATE_KEY:?Set DIRECTORY_SSO_PRIVATE_KEY in .env}
     depends_on:
       postgres:
         condition: service_healthy
