@@ -1,7 +1,7 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { NoopEmailSender, type EmailSender } from './EmailSender.js';
-import type { AccountTokenPurpose, DirectoryAccount, DirectoryAccountToken, DirectoryHome, DirectoryHomeMembership } from '../domain/entities.js';
+import type { AccountTokenPurpose, DirectoryAccount, DirectoryAccountToken, DirectoryEdgeConnection, DirectoryHome, DirectoryHomeMembership } from '../domain/entities.js';
 import { AuthenticationError, ConflictError, ForbiddenError, NotFoundError, ValidationError, clockNow, createHome, createMembership, normalizeEmail, normalizeName, normalizeEdgeHostname } from '../domain/entities.js';
 
 export interface DirectoryStore {
@@ -10,6 +10,7 @@ export interface DirectoryStore {
   createMembership(membership: DirectoryHomeMembership): Promise<void>; findByHomeAndAccount(homeId: string, accountId: string): Promise<DirectoryHomeMembership | null>; findByInvitationTokenHash(hash: string): Promise<DirectoryHomeMembership | null>; listByHome(homeId: string): Promise<DirectoryHomeMembership[]>; listActiveHomesForAccount(accountId: string): Promise<Array<{ home: DirectoryHome; membership: DirectoryHomeMembership }>>; updateMembership(membership: DirectoryHomeMembership): Promise<void>;
   createAccountToken(token: DirectoryAccountToken): Promise<void>; findAccountTokenByHash(hash: string): Promise<DirectoryAccountToken | null>; consumeAccountToken(id: string, now: string): Promise<boolean>; updateAccount(account: DirectoryAccount): Promise<void>;
   append(event: { id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string }): Promise<void>; listForHome(homeId: string): Promise<Array<{ id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string }> >;
+  createEdgeConnection(connection: DirectoryEdgeConnection): Promise<void>; findActiveByHomeId(homeId: string): Promise<DirectoryEdgeConnection | null>; findActiveByEdgeId(edgeId: string): Promise<DirectoryEdgeConnection | null>; revoke(id: string, revokedAt: string): Promise<boolean>;
 }
 
 export class DirectoryService {
@@ -67,6 +68,23 @@ export class DirectoryService {
   async revokeMembership(actorId: string, homeId: string, accountId: string): Promise<void> { await this.requireOwner(actorId,homeId); const membership=await this.store.findByHomeAndAccount(homeId,accountId); if(!membership) throw new NotFoundError('MEMBERSHIP_NOT_FOUND'); if(membership.role==='owner') throw new ForbiddenError('OWNER_MEMBERSHIP_CANNOT_BE_REVOKED'); if(membership.status==='revoked') return; await this.store.updateMembership({...membership,status:'revoked',updatedAt:clockNow()}); await this.audit(actorId,homeId,membership.id,'membership.revoked'); }
   async listMembers(actorId: string, homeId: string): Promise<Array<{ accountId:string; email:string; displayName:string; role:string; status:string }>> { await this.requireOwner(actorId,homeId); const members=await this.store.listByHome(homeId); return Promise.all(members.map(async member=>{const account=await this.store.findAccountById(member.accountId); if(!account) throw new NotFoundError('ACCOUNT_NOT_FOUND'); return {accountId:account.id,email:account.email,displayName:account.displayName,role:member.role,status:member.status};})); }
   async listAudit(actorId:string,homeId:string) { await this.requireOwner(actorId,homeId); return this.store.listForHome(homeId); }
+  async provisionEdge(actorId: string, homeId: string): Promise<{ homeId: string; edgeId: string; token: string }> {
+    await this.requireOwner(actorId, homeId);
+    const previous = await this.store.findActiveByHomeId(homeId);
+    if (previous) await this.store.revoke(previous.id, clockNow());
+    const edgeId = randomUUID();
+    const token = `${edgeId}.${randomBytes(32).toString('base64url')}`;
+    await this.store.createEdgeConnection({ id: randomUUID(), homeId, edgeId, credentialHash: hashEdgeCredential(token), createdAt: clockNow(), revokedAt: null });
+    await this.audit(actorId, homeId, null, 'edge.connection.provisioned');
+    return { homeId, edgeId, token };
+  }
+  async authenticateEdgeCredential(token: string): Promise<{ homeId: string; edgeId: string } | null> {
+    const edgeId = token.split('.', 1)[0];
+    if (!edgeId) return null;
+    const connection = await this.store.findActiveByEdgeId(edgeId);
+    if (!connection || !safeCredentialMatch(connection.credentialHash, token)) return null;
+    return { homeId: connection.homeId, edgeId: connection.edgeId };
+  }
   private async sendToken(account: DirectoryAccount, purpose: AccountTokenPurpose, ttlMs: number): Promise<void> { const token = randomBytes(32).toString("base64url"); const entity: DirectoryAccountToken = { id: randomUUID(), accountId: account.id, purpose, tokenHash: hashInvitation(token), expiresAt: new Date(Date.now() + ttlMs).toISOString(), usedAt: null, createdAt: clockNow() }; await this.store.createAccountToken(entity); const parameter = purpose === "email_verify" ? "verify" : "reset"; const subject = purpose === "email_verify" ? "Verifica tu correo de HomePilot" : "Restablece tu contrasena de HomePilot"; try { await this.emailSender.send({ to: account.email, subject, text: this.publicAppUrl + "/?" + parameter + "=" + encodeURIComponent(token) }); } catch { } }
   private async validToken(token: string, purpose: AccountTokenPurpose): Promise<DirectoryAccountToken> { const value = await this.store.findAccountTokenByHash(hashInvitation(token)); if (!value || value.purpose !== purpose) throw new NotFoundError('TOKEN_NOT_FOUND'); if (value.usedAt) throw new ValidationError('TOKEN_ALREADY_USED'); if (Date.parse(value.expiresAt) <= Date.now()) throw new ValidationError('TOKEN_EXPIRED'); return value; }
   private async requireAccountValue(id: string): Promise<DirectoryAccount> { const account = await this.store.findAccountById(id); if (!account) throw new NotFoundError('ACCOUNT_NOT_FOUND'); return account; }  private async requireAccount(id:string):Promise<void>{if(!await this.store.findAccountById(id)) throw new AuthenticationError('ACCOUNT_NOT_FOUND');}
@@ -75,3 +93,6 @@ export class DirectoryService {
   private async audit(actorAccountId:string,homeId:string,membershipId:string|null,action:string):Promise<void>{await this.store.append({id:randomUUID(),actorAccountId,homeId,membershipId,action,createdAt:clockNow()});}
 }
 export const hashInvitation=(token:string):string=>createHash('sha256').update(token).digest('hex');
+
+export const hashEdgeCredential=(token:string):string=>createHash('sha256').update(token).digest('hex');
+function safeCredentialMatch(expectedHash:string, token:string):boolean { const expected=Buffer.from(expectedHash,'hex'); const actual=Buffer.from(hashEdgeCredential(token),'hex'); return expected.length===actual.length && timingSafeEqual(expected,actual); }

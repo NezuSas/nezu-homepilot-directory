@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { enterHome } from '../web/navigation.js';
+import { enterHome, homePath } from '../web/navigation.js';
 
 describe('home selector navigation', () => {
-  it('AC5 navigates only to the exact Edge hostname without any authenticated network request', () => {
+  it('AC1 keeps an authorized selection on the same public domain route without any network request', () => {
     const assign = vi.fn();
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    enterHome('https://oscar.homepilot.example', { assign });
-    expect(assign).toHaveBeenCalledOnce();
-    expect(assign).toHaveBeenCalledWith('https://oscar.homepilot.example');
+    enterHome('home/with space', { assign });
+    expect(homePath('home/with space')).toBe('/homes/home%2Fwith%20space');
+    expect(assign).toHaveBeenCalledWith('/homes/home%2Fwith%20space');
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });

@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import rateLimit from '@fastify/rate-limit';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { AuthenticationError, ConflictError, DomainError, ForbiddenError, NotFoundError, ValidationError } from './domain/entities.js';
 import { DirectoryService, type DirectoryStore } from './application/DirectoryService.js';
@@ -12,6 +13,8 @@ import { SqliteDirectoryDatabase } from './infrastructure/SqliteDirectoryDatabas
 import { createEmailSenderFromEnvironment } from './infrastructure/EmailSenderFactory.js';
 import type { EmailSender } from './application/EmailSender.js';
 import { PostgresDirectoryDatabase } from './infrastructure/PostgresDirectoryDatabase.js';
+import { CloudGatewayRegistry } from './application/CloudGatewayRegistry.js';
+import { CloudGatewaySocketServer } from './infrastructure/CloudGatewaySocketServer.js';
 
 export interface DirectoryServerOptions { databasePath?: string; jwtSecret?: string; invitationTtlMs?: number; serveWeb?: boolean; emailSender?: EmailSender; publicAppUrl?: string; store?: DirectoryStore & { close?: () => void | Promise<void> }; }
 type AuthenticatedRequest = FastifyRequest & { accountId: string };
@@ -24,6 +27,11 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   const directory = new DirectoryService(database, options.invitationTtlMs, options.emailSender ?? createEmailSenderFromEnvironment(), options.publicAppUrl ?? process.env.PUBLIC_APP_URL ?? 'http://localhost:3100');
   const ssoIssuer = DirectorySsoIssuer.fromEnvironment();
   const app = Fastify({logger:false});
+  const gatewayRegistry = new CloudGatewayRegistry();
+  const cloudGateway = new CloudGatewaySocketServer(gatewayRegistry, {
+    authenticate: (token) => directory.authenticateEdgeCredential(token),
+  });
+  cloudGateway.install(app.server);
   app.register(cors,{origin:false});
   app.addHook('onClose', async () => { await database.close?.(); });
   const authenticated = async (request: FastifyRequest): Promise<void> => { const raw=request.headers.authorization; if(!raw?.startsWith('Bearer ')) throw new AuthenticationError('SESSION_REQUIRED'); (request as AuthenticatedRequest).accountId=sessions.verify(raw.slice(7)).accountId; };
@@ -53,6 +61,19 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   app.post('/directory/password-reset/:token/confirm', async request => { const body = request.body as { password?: unknown }; if (typeof body?.password !== 'string') throw new ValidationError('INVALID_BODY'); await directory.confirmPasswordReset((request.params as { token: string }).token, body.password); return { status: 'confirmed' }; });
   app.post('/directory/accounts/verify-email/:token', async request => { await directory.verifyEmail((request.params as { token: string }).token); return { status: 'verified' }; });  app.post('/directory/homes/:homeId/sso-token', { preHandler: authenticated }, async (request, reply) => { if (!ssoIssuer) return reply.code(503).send({ error: 'SSO_NOT_CONFIGURED' }); const accountId = (request as AuthenticatedRequest).accountId; const homeId = (request.params as { homeId: string }).homeId; await directory.getHome(accountId, homeId); return { token: ssoIssuer.issue(accountId, homeId) }; });
   app.get('/directory/homes',{preHandler:authenticated},async(request)=>directory.listHomes((request as AuthenticatedRequest).accountId));
+  app.post('/homes/:homeId/gateway/:operation',{preHandler:authenticated},async(request, reply)=>{
+    const accountId=(request as AuthenticatedRequest).accountId; const homeId=(request.params as {homeId:string}).homeId; const operation=(request.params as {operation:string}).operation;
+    const membership=(await directory.listHomes(accountId)).find(home=>home.id===homeId);
+    if(!membership) throw new ForbiddenError('HOME_ACCESS_FORBIDDEN');
+    if(operation!=='dashboard.read'&&operation!=='devices.read'&&operation!=='device.command') throw new ValidationError('GATEWAY_OPERATION_FORBIDDEN');
+    const edge=await database.findActiveByHomeId(homeId); if(!edge) return reply.code(503).send({error:'EDGE_OFFLINE'});
+    const response=await gatewayRegistry.request({homeId,edgeId:edge.edgeId},{accountId,role:membership.role},crypto.randomUUID(),operation as import('./application/CloudGatewayProtocol.js').RelayOperation,new Date(Date.now()+10_000).toISOString());
+    reply.code(response.status).send({status:response.status,payload:response.payload});
+  });
+  app.post('/directory/homes/:homeId/edge-connection',{preHandler:authenticated},async(request, reply)=>{
+    const edge = await directory.provisionEdge((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId);
+    reply.code(201).send(edge);
+  });
   app.post('/directory/homes',{preHandler:authenticated},async(request,reply)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(typeof body?.name!=='string'||typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');const home=await directory.registerHome((request as AuthenticatedRequest).accountId,{name:body.name,edgeHostname:body.edgeHostname});reply.code(201).send(home);});
   app.get('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>directory.getHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId));
   app.patch('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(body.name!==undefined&&typeof body.name!=='string'||body.edgeHostname!==undefined&&typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');return directory.updateHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId,{name:body.name as string | undefined,edgeHostname:body.edgeHostname as string | undefined});});
@@ -63,7 +84,7 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   app.post('/directory/invitations/:token/reject',{preHandler:authenticated},async(request)=>directory.rejectInvitation((request as AuthenticatedRequest).accountId,(request.params as {token:string}).token));
   app.delete('/directory/homes/:homeId/memberships/:accountId',{preHandler:authenticated},async(request,reply)=>{const params=request.params as {homeId:string;accountId:string};await directory.revokeMembership((request as AuthenticatedRequest).accountId,params.homeId,params.accountId);reply.code(204).send();});
   app.get('/directory/homes/:homeId/audit',{preHandler:authenticated},async(request)=>directory.listAudit((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId));
-  if(options.serveWeb!==false){ const here=dirname(fileURLToPath(import.meta.url)); app.register(fastifyStatic,{root:join(here,'web'),prefix:'/'}); app.get('/',async(_request,reply)=>reply.sendFile('index.html')); }
+  if(options.serveWeb!==false){ const here=dirname(fileURLToPath(import.meta.url)); app.register(fastifyStatic,{root:join(here,'web'),prefix:'/'}); app.get('/',async(_request,reply)=>reply.sendFile('index.html')); app.get('/homes/:homeId',async(_request,reply)=>reply.sendFile('index.html')); }
   return app;
 }
 

@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AccountRepository, AuditRepository, HomeMembershipRepository, HomeRepository } from '../domain/repositories.js';
-import type { AccountTokenPurpose, AuditEvent, DirectoryAccount, DirectoryAccountToken, DirectoryHome, DirectoryHomeMembership, MembershipStatus } from '../domain/entities.js';
+import type { AccountTokenPurpose, AuditEvent, DirectoryAccount, DirectoryAccountToken, DirectoryEdgeConnection, DirectoryHome, DirectoryHomeMembership, MembershipStatus } from '../domain/entities.js';
 
 export class SqliteDirectoryDatabase {
   readonly db: Database.Database;
@@ -16,6 +16,7 @@ export class SqliteDirectoryDatabase {
       CREATE TABLE IF NOT EXISTS directory_audit_events (id TEXT PRIMARY KEY, actor_account_id TEXT NOT NULL, home_id TEXT, membership_id TEXT, action TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS idx_audit_home_created ON directory_audit_events(home_id, created_at DESC);
       CREATE TABLE IF NOT EXISTS directory_account_tokens (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES directory_accounts(id) ON DELETE CASCADE, purpose TEXT NOT NULL CHECK(purpose IN ('email_verify','password_reset')), token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS directory_edge_connections (id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES directory_homes(id) ON DELETE CASCADE, edge_id TEXT NOT NULL UNIQUE, credential_hash TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT);
     `);
   }
   async createAccount(account: DirectoryAccount): Promise<void> { this.db.prepare('INSERT INTO directory_accounts (id,email,password_hash,display_name,created_at) VALUES (?, ?, ?, ?, ?)').run(account.id, account.email, account.passwordHash, account.displayName, account.createdAt); }
@@ -36,7 +37,11 @@ export class SqliteDirectoryDatabase {
   async listActiveHomesForAccount(accountId: string): Promise<Array<{ home: DirectoryHome; membership: DirectoryHomeMembership }>> { const rows=this.db.prepare(`SELECT h.id h_id,h.name h_name,h.edge_hostname h_edge_hostname,h.owner_account_id h_owner_account_id,h.created_at h_created_at,h.updated_at h_updated_at,m.id m_id,m.home_id m_home_id,m.account_id m_account_id,m.role m_role,m.status m_status,m.invited_by_account_id m_invited_by_account_id,m.invitation_token_hash m_invitation_token_hash,m.invitation_expires_at m_invitation_expires_at,m.created_at m_created_at,m.updated_at m_updated_at FROM directory_home_memberships m JOIN directory_homes h ON h.id=m.home_id WHERE m.account_id=? AND m.status='active' ORDER BY h.name COLLATE NOCASE`).all(accountId) as JoinRow[]; return rows.map(row=>({home:{id:row.h_id,name:row.h_name,edgeHostname:row.h_edge_hostname,ownerAccountId:row.h_owner_account_id,createdAt:row.h_created_at,updatedAt:row.h_updated_at},membership:{id:row.m_id,homeId:row.m_home_id,accountId:row.m_account_id,role:row.m_role as 'owner'|'member',status:row.m_status as MembershipStatus,invitedByAccountId:row.m_invited_by_account_id,invitationTokenHash:row.m_invitation_token_hash,invitationExpiresAt:row.m_invitation_expires_at,createdAt:row.m_created_at,updatedAt:row.m_updated_at}})); }
   async updateMembership(m: DirectoryHomeMembership): Promise<void> { this.db.prepare('UPDATE directory_home_memberships SET role=?,status=?,invited_by_account_id=?,invitation_token_hash=?,invitation_expires_at=?,updated_at=? WHERE id=?').run(m.role,m.status,m.invitedByAccountId,m.invitationTokenHash,m.invitationExpiresAt,m.updatedAt,m.id); }
   async updateStatus(id: string,status: MembershipStatus,updatedAt: string): Promise<void> { this.db.prepare('UPDATE directory_home_memberships SET status=?,updated_at=? WHERE id=?').run(status,updatedAt,id); }
-  async append(e: AuditEvent): Promise<void> { this.db.prepare('INSERT INTO directory_audit_events VALUES (?, ?, ?, ?, ?, ?)').run(e.id,e.actorAccountId,e.homeId,e.membershipId,e.action,e.createdAt); }
+  async createEdgeConnection(value: DirectoryEdgeConnection): Promise<void> { this.db.prepare('INSERT INTO directory_edge_connections VALUES (?, ?, ?, ?, ?, ?)').run(value.id,value.homeId,value.edgeId,value.credentialHash,value.createdAt,value.revokedAt); }
+  async findActiveByHomeId(homeId: string): Promise<DirectoryEdgeConnection | null> { const row=this.db.prepare('SELECT * FROM directory_edge_connections WHERE home_id=? AND revoked_at IS NULL').get(homeId) as EdgeConnectionRow|undefined; return row?edgeConnection(row):null; }
+  async findActiveByEdgeId(edgeId: string): Promise<DirectoryEdgeConnection | null> { const row=this.db.prepare('SELECT * FROM directory_edge_connections WHERE edge_id=? AND revoked_at IS NULL').get(edgeId) as EdgeConnectionRow|undefined; return row?edgeConnection(row):null; }
+  async revoke(id: string, revokedAt: string): Promise<boolean> { return this.db.prepare('UPDATE directory_edge_connections SET revoked_at=? WHERE id=? AND revoked_at IS NULL').run(revokedAt,id).changes===1; }
+    async append(e: AuditEvent): Promise<void> { this.db.prepare('INSERT INTO directory_audit_events VALUES (?, ?, ?, ?, ?, ?)').run(e.id,e.actorAccountId,e.homeId,e.membershipId,e.action,e.createdAt); }
   async listForHome(homeId: string): Promise<AuditEvent[]> { return (this.db.prepare('SELECT * FROM directory_audit_events WHERE home_id=? ORDER BY created_at DESC').all(homeId) as AuditRow[]).map(row=>({id:row.id,actorAccountId:row.actor_account_id,homeId:row.home_id,membershipId:row.membership_id,action:row.action,createdAt:row.created_at})); }
   close(): void { this.db.close(); }
 }
@@ -45,7 +50,9 @@ interface TokenRow { id:string;account_id:string;purpose:string;token_hash:strin
 interface HomeRow { id:string; name:string; edge_hostname:string; owner_account_id:string; created_at:string; updated_at:string; }
 interface MembershipRow { id:string; home_id:string; account_id:string; role:string; status:string; invited_by_account_id:string|null; invitation_token_hash:string|null; invitation_expires_at:string|null; created_at:string; updated_at:string; }
 interface JoinRow { h_id:string;h_name:string;h_edge_hostname:string;h_owner_account_id:string;h_created_at:string;h_updated_at:string;m_id:string;m_home_id:string;m_account_id:string;m_role:string;m_status:string;m_invited_by_account_id:string|null;m_invitation_token_hash:string|null;m_invitation_expires_at:string|null;m_created_at:string;m_updated_at:string; }
+interface EdgeConnectionRow { id:string;home_id:string;edge_id:string;credential_hash:string;created_at:string;revoked_at:string|null; }
 interface AuditRow { id:string;actor_account_id:string;home_id:string|null;membership_id:string|null;action:string;created_at:string; }
+const edgeConnection=(r:EdgeConnectionRow):DirectoryEdgeConnection=>({id:r.id,homeId:r.home_id,edgeId:r.edge_id,credentialHash:r.credential_hash,createdAt:r.created_at,revokedAt:r.revoked_at});
 const account=(r:AccountRow):DirectoryAccount=>({id:r.id,email:r.email,passwordHash:r.password_hash,displayName:r.display_name,emailVerified:Boolean(r.email_verified),createdAt:r.created_at});
 const home=(r:HomeRow):DirectoryHome=>({id:r.id,name:r.name,edgeHostname:r.edge_hostname,ownerAccountId:r.owner_account_id,createdAt:r.created_at,updatedAt:r.updated_at});
 const membership=(r:MembershipRow):DirectoryHomeMembership=>({id:r.id,homeId:r.home_id,accountId:r.account_id,role:r.role as 'owner'|'member',status:r.status as MembershipStatus,invitedByAccountId:r.invited_by_account_id,invitationTokenHash:r.invitation_token_hash,invitationExpiresAt:r.invitation_expires_at,createdAt:r.created_at,updatedAt:r.updated_at});
