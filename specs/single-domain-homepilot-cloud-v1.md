@@ -26,8 +26,8 @@ datos y control local, incluida la operación sin Internet.
 
 - **REQ-1:** El navegador solo navega dentro del dominio único, con contexto de
   hogar en `/homes/:homeId`; no redirige a `edgeHostname`.
-- **REQ-2:** Un instalador empareja cada MiniPC mediante código de un solo uso. El
-  Edge crea una conexión saliente autenticada; Cloud nunca abre una conexión de
+- **REQ-2:** Un propietario autenticado genera un código de un solo uso para la Casa y el
+  instalador lo reclama en la MiniPC. El Edge crea una conexión saliente autenticada; Cloud nunca abre una conexión de
   administración hacia la LAN del cliente.
 - **REQ-3:** Cloud autoriza una operación mediante membresía activa y rol explícito
   del hogar, y la enruta únicamente al Edge emparejado y conectado.

@@ -39,7 +39,7 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
     const frameworkStatus = typeof (error as { statusCode?: unknown }).statusCode === 'number' ? (error as { statusCode: number }).statusCode : undefined;
     const gatewayStatus = error instanceof CloudGatewayRegistryError ? (error.code === 'EDGE_OFFLINE' ? 503 : error.code === 'GATEWAY_REQUEST_EXPIRED' ? 504 : 409) : undefined;
     const status = error instanceof AuthenticationError ? 401 : error instanceof ForbiddenError ? 403 : error instanceof NotFoundError ? 404 : error instanceof ConflictError ? 409 : error instanceof ValidationError ? 400 : gatewayStatus ?? frameworkStatus ?? 500;
-    reply.code(status).send({ error: error instanceof DomainError ? error.code : error instanceof CloudGatewayRegistryError ? error.code : status === 429 ? 'RATE_LIMIT_EXCEEDED' : 'INTERNAL_ERROR' });
+    reply.code(status).send({ error: error instanceof DomainError ? error.code : error instanceof CloudGatewayRegistryError ? error.code : status === 429 ? 'RATE_LIMIT_EXCEEDED' : status === 415 ? 'UNSUPPORTED_MEDIA_TYPE' : 'INTERNAL_ERROR' });
   });
   app.get('/health',async()=>({status:'ok'}));
   app.get('/directory/sso/public-key', async (_request, reply) => { if (!ssoIssuer) return reply.code(503).send({ error: 'SSO_NOT_CONFIGURED' }); return { publicKey: ssoIssuer.publicKey() }; });
@@ -87,11 +87,8 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
     gatewayRegistry.receive(identity.edgeId, request.body);
     reply.code(204).send();
   });
-  app.post('/directory/homes/:homeId/edge-connection',{preHandler:authenticated},async(request, reply)=>{
-    const edge = await directory.provisionEdge((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId);
-    const gatewayUrl = new URL('/gateway/edge', process.env.PUBLIC_APP_URL ?? 'http://localhost:3100'); gatewayUrl.protocol = gatewayUrl.protocol === 'https:' ? 'wss:' : 'ws:';
-    reply.code(201).send({ ...edge, gatewayUrl: gatewayUrl.toString() });
-  });
+  app.post('/directory/homes/:homeId/edge-pairing-code',{preHandler:authenticated},async(request, reply)=>{ const pairing=await directory.createPairingCode((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId); reply.code(201).send(pairing); });
+  app.register(async pairingRoutes => { await pairingRoutes.register(rateLimit,{max:5,timeWindow:'1 minute'}); pairingRoutes.post('/directory/edge-pairing/claim',async(request,reply)=>{const code=(request.body as {code?:unknown})?.code;if(typeof code!=='string')throw new ValidationError('INVALID_BODY');const edge=await directory.claimPairingCode(code);reply.code(201).send({...edge,gatewayUrl:(process.env.PUBLIC_APP_URL ?? 'https://accounts.nezuecuador.com').replace(/^https:/,'wss:') + '/gateway/edge'});}); });
   app.post('/directory/homes',{preHandler:authenticated},async(request,reply)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(typeof body?.name!=='string'||body.edgeHostname!==undefined&&typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');const home=await directory.registerHome((request as AuthenticatedRequest).accountId,{name:body.name,edgeHostname:body.edgeHostname});reply.code(201).send(home);});
   app.get('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>directory.getHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId));
   app.patch('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(body.name!==undefined&&typeof body.name!=='string'||body.edgeHostname!==undefined&&typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');return directory.updateHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId,{name:body.name as string | undefined,edgeHostname:body.edgeHostname as string | undefined});});

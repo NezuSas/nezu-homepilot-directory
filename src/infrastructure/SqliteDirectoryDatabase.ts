@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AccountRepository, AuditRepository, HomeMembershipRepository, HomeRepository } from '../domain/repositories.js';
-import type { AccountTokenPurpose, AuditEvent, DirectoryAccount, DirectoryAccountToken, DirectoryEdgeConnection, DirectoryHome, DirectoryHomeMembership, MembershipStatus } from '../domain/entities.js';
+import type { AccountTokenPurpose, AuditEvent, DirectoryAccount, DirectoryAccountToken, DirectoryEdgeConnection, DirectoryPairingCode, DirectoryHome, DirectoryHomeMembership, MembershipStatus } from '../domain/entities.js';
 
 export class SqliteDirectoryDatabase {
   readonly db: Database.Database;
@@ -16,7 +16,7 @@ export class SqliteDirectoryDatabase {
       CREATE TABLE IF NOT EXISTS directory_audit_events (id TEXT PRIMARY KEY, actor_account_id TEXT NOT NULL, home_id TEXT, membership_id TEXT, action TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS idx_audit_home_created ON directory_audit_events(home_id, created_at DESC);
       CREATE TABLE IF NOT EXISTS directory_account_tokens (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES directory_accounts(id) ON DELETE CASCADE, purpose TEXT NOT NULL CHECK(purpose IN ('email_verify','password_reset')), token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS directory_edge_connections (id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES directory_homes(id) ON DELETE CASCADE, edge_id TEXT NOT NULL UNIQUE, credential_hash TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT);
+      CREATE TABLE IF NOT EXISTS directory_edge_connections (id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES directory_homes(id) ON DELETE CASCADE, edge_id TEXT NOT NULL UNIQUE, credential_hash TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT); CREATE TABLE IF NOT EXISTS directory_pairing_codes (id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES directory_homes(id) ON DELETE CASCADE, code_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL);
     `);
   }
   async createAccount(account: DirectoryAccount): Promise<void> { this.db.prepare('INSERT INTO directory_accounts (id,email,password_hash,display_name,created_at) VALUES (?, ?, ?, ?, ?)').run(account.id, account.email, account.passwordHash, account.displayName, account.createdAt); }
@@ -41,6 +41,9 @@ export class SqliteDirectoryDatabase {
   async findActiveByHomeId(homeId: string): Promise<DirectoryEdgeConnection | null> { const row=this.db.prepare('SELECT * FROM directory_edge_connections WHERE home_id=? AND revoked_at IS NULL').get(homeId) as EdgeConnectionRow|undefined; return row?edgeConnection(row):null; }
   async findActiveByEdgeId(edgeId: string): Promise<DirectoryEdgeConnection | null> { const row=this.db.prepare('SELECT * FROM directory_edge_connections WHERE edge_id=? AND revoked_at IS NULL').get(edgeId) as EdgeConnectionRow|undefined; return row?edgeConnection(row):null; }
   async revoke(id: string, revokedAt: string): Promise<boolean> { return this.db.prepare('UPDATE directory_edge_connections SET revoked_at=? WHERE id=? AND revoked_at IS NULL').run(revokedAt,id).changes===1; }
+  async invalidatePairingCodes(homeId:string,now:string):Promise<void>{this.db.prepare('UPDATE directory_pairing_codes SET used_at=? WHERE home_id=? AND used_at IS NULL').run(now,homeId);}
+  async createPairingCode(value:DirectoryPairingCode):Promise<void>{this.db.prepare('INSERT INTO directory_pairing_codes VALUES (?,?,?,?,?,?)').run(value.id,value.homeId,value.codeHash,value.expiresAt,value.usedAt,value.createdAt);}
+  async claimPairingCode(hash:string,now:string,connection:DirectoryEdgeConnection):Promise<'claimed'|'invalid'|'used'|'expired'>{const tx=this.db.transaction(()=>{const row=this.db.prepare('SELECT * FROM directory_pairing_codes WHERE code_hash=?').get(hash) as {home_id:string;expires_at:string;used_at:string|null}|undefined;if(!row)return 'invalid' as const;if(row.used_at)return 'used' as const;if(Date.parse(row.expires_at)<=Date.parse(now))return 'expired' as const;if(this.db.prepare('UPDATE directory_pairing_codes SET used_at=? WHERE code_hash=? AND used_at IS NULL AND expires_at>?').run(now,hash,now).changes!==1)return 'used' as const;connection.homeId=row.home_id;this.db.prepare('UPDATE directory_edge_connections SET revoked_at=? WHERE home_id=? AND revoked_at IS NULL').run(now,row.home_id);this.db.prepare('INSERT INTO directory_edge_connections VALUES (?,?,?,?,?,?)').run(connection.id,connection.homeId,connection.edgeId,connection.credentialHash,connection.createdAt,null);return 'claimed' as const;});return tx();}
     async append(e: AuditEvent): Promise<void> { this.db.prepare('INSERT INTO directory_audit_events VALUES (?, ?, ?, ?, ?, ?)').run(e.id,e.actorAccountId,e.homeId,e.membershipId,e.action,e.createdAt); }
   async listForHome(homeId: string): Promise<AuditEvent[]> { return (this.db.prepare('SELECT * FROM directory_audit_events WHERE home_id=? ORDER BY created_at DESC').all(homeId) as AuditRow[]).map(row=>({id:row.id,actorAccountId:row.actor_account_id,homeId:row.home_id,membershipId:row.membership_id,action:row.action,createdAt:row.created_at})); }
   close(): void { this.db.close(); }

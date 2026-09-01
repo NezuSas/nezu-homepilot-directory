@@ -151,3 +151,14 @@ it('issues distinct signed 60-second SSO tokens only for active home memberships
     else process.env.DIRECTORY_SSO_PRIVATE_KEY = previous;
   }
 });
+
+it('creates a pairing code over HTTP and rejects a reused claim', async () => {
+  const app = createApp();
+  const owner = await account(app, 'pairing-http@example.com', 'Pairing HTTP');
+  const home = (await request(app, 'POST', '/directory/homes', { name: 'Casa pairing' }, owner.token)).json() as { id: string };
+  const issued = await request(app, 'POST', `/directory/homes/${home.id}/edge-pairing-code`, {}, owner.token);
+  expect(issued.statusCode).toBe(201);
+  const code = (issued.json() as { code: string }).code;
+  expect((await request(app, 'POST', '/directory/edge-pairing/claim', { code })).statusCode).toBe(201);
+  expect((await request(app, 'POST', '/directory/edge-pairing/claim', { code })).statusCode).toBe(400);
+});

@@ -9,6 +9,7 @@ export interface DirectoryAccountToken { id: string; accountId: string; purpose:
 export interface DirectoryHome { id: string; name: string; edgeHostname: string; ownerAccountId: string; createdAt: string; updatedAt: string; }
 export interface DirectoryHomeMembership { id: string; homeId: string; accountId: string; role: MembershipRole; status: MembershipStatus; invitedByAccountId: string | null; invitationTokenHash: string | null; invitationExpiresAt: string | null; createdAt: string; updatedAt: string; }
 export interface DirectoryEdgeConnection { id: string; homeId: string; edgeId: string; credentialHash: string; createdAt: string; revokedAt: string | null; }
+export interface DirectoryPairingCode { id:string; homeId:string; codeHash:string; expiresAt:string; usedAt:string|null; createdAt:string; }
 export interface AuditEvent { id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string; }
 
 export const clockNow = (): string => new Date().toISOString();

@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { NoopEmailSender, type EmailSender } from './EmailSender.js';
-import type { AccountTokenPurpose, DirectoryAccount, DirectoryAccountToken, DirectoryEdgeConnection, DirectoryHome, DirectoryHomeMembership } from '../domain/entities.js';
+import type { AccountTokenPurpose, DirectoryAccount, DirectoryAccountToken, DirectoryEdgeConnection, DirectoryHome, DirectoryHomeMembership, DirectoryPairingCode } from '../domain/entities.js';
 import { AuthenticationError, ConflictError, ForbiddenError, NotFoundError, ValidationError, clockNow, createHome, createMembership, normalizeEmail, normalizeName, normalizeEdgeHostname } from '../domain/entities.js';
 
 export interface DirectoryStore {
@@ -11,6 +11,7 @@ export interface DirectoryStore {
   createAccountToken(token: DirectoryAccountToken): Promise<void>; findAccountTokenByHash(hash: string): Promise<DirectoryAccountToken | null>; consumeAccountToken(id: string, now: string): Promise<boolean>; updateAccount(account: DirectoryAccount): Promise<void>;
   append(event: { id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string }): Promise<void>; listForHome(homeId: string): Promise<Array<{ id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string }> >;
   createEdgeConnection(connection: DirectoryEdgeConnection): Promise<void>; findActiveByHomeId(homeId: string): Promise<DirectoryEdgeConnection | null>; findActiveByEdgeId(edgeId: string): Promise<DirectoryEdgeConnection | null>; revoke(id: string, revokedAt: string): Promise<boolean>;
+  invalidatePairingCodes(homeId:string, now:string): Promise<void>; createPairingCode(value: DirectoryPairingCode): Promise<void>; claimPairingCode(hash:string, now:string, connection:DirectoryEdgeConnection): Promise<'claimed'|'invalid'|'used'|'expired'>;
 }
 
 export class DirectoryService {
@@ -68,15 +69,13 @@ export class DirectoryService {
   async revokeMembership(actorId: string, homeId: string, accountId: string): Promise<void> { await this.requireOwner(actorId,homeId); const membership=await this.store.findByHomeAndAccount(homeId,accountId); if(!membership) throw new NotFoundError('MEMBERSHIP_NOT_FOUND'); if(membership.role==='owner') throw new ForbiddenError('OWNER_MEMBERSHIP_CANNOT_BE_REVOKED'); if(membership.status==='revoked') return; await this.store.updateMembership({...membership,status:'revoked',updatedAt:clockNow()}); await this.audit(actorId,homeId,membership.id,'membership.revoked'); }
   async listMembers(actorId: string, homeId: string): Promise<Array<{ accountId:string; email:string; displayName:string; role:string; status:string }>> { await this.requireOwner(actorId,homeId); const members=await this.store.listByHome(homeId); return Promise.all(members.map(async member=>{const account=await this.store.findAccountById(member.accountId); if(!account) throw new NotFoundError('ACCOUNT_NOT_FOUND'); return {accountId:account.id,email:account.email,displayName:account.displayName,role:member.role,status:member.status};})); }
   async listAudit(actorId:string,homeId:string) { await this.requireOwner(actorId,homeId); return this.store.listForHome(homeId); }
-  async provisionEdge(actorId: string, homeId: string): Promise<{ homeId: string; edgeId: string; token: string }> {
-    await this.requireOwner(actorId, homeId);
-    const previous = await this.store.findActiveByHomeId(homeId);
-    if (previous) await this.store.revoke(previous.id, clockNow());
-    const edgeId = randomUUID();
-    const token = `${edgeId}.${randomBytes(32).toString('base64url')}`;
-    await this.store.createEdgeConnection({ id: randomUUID(), homeId, edgeId, credentialHash: hashEdgeCredential(token), createdAt: clockNow(), revokedAt: null });
-    await this.audit(actorId, homeId, null, 'edge.connection.provisioned');
-    return { homeId, edgeId, token };
+  async createPairingCode(actorId:string, homeId:string, ttlMs=10*60*1000):Promise<{code:string;expiresAt:string}>{
+    await this.requireOwner(actorId,homeId); const code=randomBytes(18).toString('base64url'); const now=clockNow(); const expiresAt=new Date(Date.now()+ttlMs).toISOString();
+    await this.store.invalidatePairingCodes(homeId, now); await this.store.createPairingCode({id:randomUUID(),homeId,codeHash:hashPairingCode(code),expiresAt,usedAt:null,createdAt:now}); await this.audit(actorId,homeId,null,'edge.pairing.code.created'); return {code,expiresAt};
+  }
+  async claimPairingCode(code:string):Promise<{homeId:string;edgeId:string;token:string}>{
+    if(!code||code.length>256) throw new ValidationError('EDGE_PAIRING_INVALID'); const edgeId=randomUUID(); const token=`${edgeId}.${randomBytes(32).toString('base64url')}`; const connection:DirectoryEdgeConnection={id:randomUUID(),homeId:'',edgeId,credentialHash:hashEdgeCredential(token),createdAt:clockNow(),revokedAt:null};
+    const outcome=await this.store.claimPairingCode(hashPairingCode(code),connection.createdAt,connection); if(outcome!=='claimed') throw new ValidationError(outcome==='expired'?'EDGE_PAIRING_EXPIRED':outcome==='used'?'EDGE_PAIRING_USED':'EDGE_PAIRING_INVALID'); await this.audit('edge-installer',connection.homeId,null,'edge.connection.claimed'); return {homeId:connection.homeId,edgeId,token};
   }
   async authenticateEdgeCredential(token: string): Promise<{ homeId: string; edgeId: string } | null> {
     const edgeId = token.split('.', 1)[0];
@@ -95,4 +94,5 @@ export class DirectoryService {
 export const hashInvitation=(token:string):string=>createHash('sha256').update(token).digest('hex');
 
 export const hashEdgeCredential=(token:string):string=>createHash('sha256').update(token).digest('hex');
+export const hashPairingCode=(code:string):string=>createHash('sha256').update(code).digest('hex');
 function safeCredentialMatch(expectedHash:string, token:string):boolean { const expected=Buffer.from(expectedHash,'hex'); const actual=Buffer.from(hashEdgeCredential(token),'hex'); return expected.length===actual.length && timingSafeEqual(expected,actual); }
