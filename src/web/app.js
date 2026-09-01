@@ -7,7 +7,7 @@ async function api(path,options={}){const headers=buildApiHeaders(Boolean(option
 function setTab(tab){q('#login').hidden=tab!=='login';q('#register').hidden=tab!=='register';const recoveryForm=q('#password-reset-request');if(recoveryForm)recoveryForm.hidden=tab!=='login';document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('active',button.dataset.tab===tab));}
 async function enterHomeFromSelector(home){
   try {
-    const result=await api(/directory/homes//sso-token,{method:'POST'});
+    const result=await api(`/directory/homes/${home.id}/sso-token`,{method:'POST'});
     enterHome(home,result.token);
   } catch(error) {
     notice(error.message==='EDGE_NOT_PAIRED'?'Esta casa todavía no está conectada a su HomePilot.':error.message);
