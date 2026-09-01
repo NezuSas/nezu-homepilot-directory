@@ -6,8 +6,8 @@ describe('home selector navigation', () => {
     const assign = vi.fn();
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     enterHome('home/with space', { assign });
-    expect(homePath('home/with space')).toBe('/homes/home%2Fwith%20space');
-    expect(assign).toHaveBeenCalledWith('/homes/home%2Fwith%20space');
+    expect(homePath('home/with space')).toBe('/homes/home%2Fwith%20space/console');
+    expect(assign).toHaveBeenCalledWith('/homes/home%2Fwith%20space/console');
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });

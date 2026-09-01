@@ -16,6 +16,7 @@ export interface RelayMessage extends RelayIdentity {
   principal?: RelayPrincipal;
   status?: number;
   payload?: unknown;
+  input?: unknown;
 }
 
 export class CloudGatewayProtocolError extends Error {
@@ -34,7 +35,7 @@ export function parseRelayMessage(value: unknown, expected: RelayIdentity, now =
   if (value.type !== 'cloud.request' || !isText(value.expiresAt) || !isRelayOperation(value.operation) || !isPrincipal(value.principal)) throw new CloudGatewayProtocolError('GATEWAY_PROTOCOL_INVALID');
   if (Date.parse(value.expiresAt) <= now.getTime()) throw new CloudGatewayProtocolError('GATEWAY_REQUEST_EXPIRED');
   if (value.operation === 'device.command' && value.principal.role !== 'owner') throw new CloudGatewayProtocolError('GATEWAY_OPERATION_FORBIDDEN');
-  return { protocolVersion: CLOUD_GATEWAY_PROTOCOL_VERSION, type: value.type, homeId: value.homeId, edgeId: value.edgeId, requestId: value.requestId, expiresAt: value.expiresAt, operation: value.operation, principal: value.principal };
+  return { protocolVersion: CLOUD_GATEWAY_PROTOCOL_VERSION, type: value.type, homeId: value.homeId, edgeId: value.edgeId, requestId: value.requestId, expiresAt: value.expiresAt, operation: value.operation, principal: value.principal, input: value.input };
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function isText(value: unknown): value is string { return typeof value === 'string' && value.trim().length > 0 && value.length <= 160; }

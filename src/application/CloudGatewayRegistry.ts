@@ -32,11 +32,11 @@ export class CloudGatewayRegistry {
     current.pending.clear();
   }
 
-  async request(identity: RelayIdentity, principal: RelayPrincipal, requestId: string, operation: RelayOperation, expiresAt: string): Promise<GatewayResponse> {
+  async request(identity: RelayIdentity, principal: RelayPrincipal, requestId: string, operation: RelayOperation, expiresAt: string, input?: unknown): Promise<GatewayResponse> {
     const edge = this.edges.get(identity.edgeId);
     if (!edge || edge.identity.homeId !== identity.homeId) throw new CloudGatewayRegistryError('EDGE_OFFLINE');
     if (edge.pending.has(requestId)) throw new CloudGatewayRegistryError('GATEWAY_REQUEST_DUPLICATED');
-    const message = parseRelayMessage({ protocolVersion: CLOUD_GATEWAY_PROTOCOL_VERSION, type: 'cloud.request', ...identity, principal, requestId, operation, expiresAt }, identity);
+    const message = parseRelayMessage({ protocolVersion: CLOUD_GATEWAY_PROTOCOL_VERSION, type: 'cloud.request', ...identity, principal, requestId, operation, expiresAt, input }, identity);
     const expiresAtMs = Date.parse(expiresAt);
     if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) throw new CloudGatewayRegistryError('GATEWAY_REQUEST_EXPIRED');
 
