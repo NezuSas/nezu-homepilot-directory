@@ -13,7 +13,7 @@ import { SqliteDirectoryDatabase } from './infrastructure/SqliteDirectoryDatabas
 import { createEmailSenderFromEnvironment } from './infrastructure/EmailSenderFactory.js';
 import type { EmailSender } from './application/EmailSender.js';
 import { PostgresDirectoryDatabase } from './infrastructure/PostgresDirectoryDatabase.js';
-import { CloudGatewayRegistry } from './application/CloudGatewayRegistry.js';
+import { CloudGatewayRegistry, CloudGatewayRegistryError } from './application/CloudGatewayRegistry.js';
 import { CloudGatewaySocketServer } from './infrastructure/CloudGatewaySocketServer.js';
 
 export interface DirectoryServerOptions { databasePath?: string; jwtSecret?: string; invitationTtlMs?: number; serveWeb?: boolean; emailSender?: EmailSender; publicAppUrl?: string; store?: DirectoryStore & { close?: () => void | Promise<void> }; }
@@ -37,8 +37,9 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   const authenticated = async (request: FastifyRequest): Promise<void> => { const raw=request.headers.authorization; if(!raw?.startsWith('Bearer ')) throw new AuthenticationError('SESSION_REQUIRED'); (request as AuthenticatedRequest).accountId=sessions.verify(raw.slice(7)).accountId; };
   app.setErrorHandler((error, _request, reply) => {
     const frameworkStatus = typeof (error as { statusCode?: unknown }).statusCode === 'number' ? (error as { statusCode: number }).statusCode : undefined;
-    const status = error instanceof AuthenticationError ? 401 : error instanceof ForbiddenError ? 403 : error instanceof NotFoundError ? 404 : error instanceof ConflictError ? 409 : error instanceof ValidationError ? 400 : frameworkStatus ?? 500;
-    reply.code(status).send({ error: error instanceof DomainError ? error.code : status === 429 ? 'RATE_LIMIT_EXCEEDED' : 'INTERNAL_ERROR' });
+    const gatewayStatus = error instanceof CloudGatewayRegistryError ? (error.code === 'EDGE_OFFLINE' ? 503 : error.code === 'GATEWAY_REQUEST_EXPIRED' ? 504 : 409) : undefined;
+    const status = error instanceof AuthenticationError ? 401 : error instanceof ForbiddenError ? 403 : error instanceof NotFoundError ? 404 : error instanceof ConflictError ? 409 : error instanceof ValidationError ? 400 : gatewayStatus ?? frameworkStatus ?? 500;
+    reply.code(status).send({ error: error instanceof DomainError ? error.code : error instanceof CloudGatewayRegistryError ? error.code : status === 429 ? 'RATE_LIMIT_EXCEEDED' : 'INTERNAL_ERROR' });
   });
   app.get('/health',async()=>({status:'ok'}));
   app.get('/directory/sso/public-key', async (_request, reply) => { if (!ssoIssuer) return reply.code(503).send({ error: 'SSO_NOT_CONFIGURED' }); return { publicKey: ssoIssuer.publicKey() }; });
@@ -70,11 +71,28 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
     const response=await gatewayRegistry.request({homeId,edgeId:edge.edgeId},{accountId,role:membership.role},crypto.randomUUID(),operation as import('./application/CloudGatewayProtocol.js').RelayOperation,new Date(Date.now()+10_000).toISOString());
     reply.code(response.status).send({status:response.status,payload:response.payload});
   });
+  const edgeGatewayIdentity = async (request: FastifyRequest): Promise<import('./application/CloudGatewayProtocol.js').RelayIdentity> => {
+    const token = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7).trim() : '';
+    const identity = token ? await directory.authenticateEdgeCredential(token) : null;
+    const body = request.body as { homeId?: unknown; edgeId?: unknown };
+    if (!identity || body?.homeId !== identity.homeId || body?.edgeId !== identity.edgeId) throw new AuthenticationError('EDGE_CREDENTIAL_INVALID');
+    return identity;
+  };
+  app.post('/gateway/edge/poll', { bodyLimit: 64 * 1024 }, async (request) => {
+    const identity = await edgeGatewayIdentity(request);
+    return gatewayRegistry.poll(identity);
+  });
+  app.post('/gateway/edge/response', { bodyLimit: 64 * 1024 }, async (request, reply) => {
+    const identity = await edgeGatewayIdentity(request);
+    gatewayRegistry.receive(identity.edgeId, request.body);
+    reply.code(204).send();
+  });
   app.post('/directory/homes/:homeId/edge-connection',{preHandler:authenticated},async(request, reply)=>{
     const edge = await directory.provisionEdge((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId);
-    reply.code(201).send(edge);
+    const gatewayUrl = new URL('/gateway/edge', process.env.PUBLIC_APP_URL ?? 'http://localhost:3100'); gatewayUrl.protocol = gatewayUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    reply.code(201).send({ ...edge, gatewayUrl: gatewayUrl.toString() });
   });
-  app.post('/directory/homes',{preHandler:authenticated},async(request,reply)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(typeof body?.name!=='string'||typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');const home=await directory.registerHome((request as AuthenticatedRequest).accountId,{name:body.name,edgeHostname:body.edgeHostname});reply.code(201).send(home);});
+  app.post('/directory/homes',{preHandler:authenticated},async(request,reply)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(typeof body?.name!=='string'||body.edgeHostname!==undefined&&typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');const home=await directory.registerHome((request as AuthenticatedRequest).accountId,{name:body.name,edgeHostname:body.edgeHostname});reply.code(201).send(home);});
   app.get('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>directory.getHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId));
   app.patch('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(body.name!==undefined&&typeof body.name!=='string'||body.edgeHostname!==undefined&&typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');return directory.updateHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId,{name:body.name as string | undefined,edgeHostname:body.edgeHostname as string | undefined});});
   app.delete('/directory/homes/:homeId',{preHandler:authenticated},async(request,reply)=>{await directory.deleteHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId);reply.code(204).send();});

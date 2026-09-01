@@ -65,6 +65,27 @@ export class CloudGatewayRegistry {
     });
   }
 
+  async poll(identity: RelayIdentity, timeoutMs = 25_000): Promise<unknown> {
+    return new Promise((resolve) => {
+      let delivered = false;
+      const channel: EdgeChannel = {
+        send: (message) => {
+          if (delivered) return;
+          delivered = true;
+          clearTimeout(timeout);
+          resolve(JSON.parse(message) as unknown);
+        },
+      };
+      const timeout = setTimeout(() => {
+        if (delivered) return;
+        delivered = true;
+        this.disconnect(identity.edgeId, channel);
+        resolve({ protocolVersion: CLOUD_GATEWAY_PROTOCOL_VERSION, type: 'edge.heartbeat', ...identity });
+      }, timeoutMs);
+      timeout.unref();
+      this.connect(identity, channel);
+    });
+  }
   receive(edgeId: string, rawMessage: unknown): void {
     const edge = this.edges.get(edgeId);
     if (!edge) throw new CloudGatewayRegistryError('EDGE_OFFLINE');

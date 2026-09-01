@@ -6,7 +6,7 @@ Servicio cloud independiente que registra cuentas globales, casas/Edges y membre
 
 - **Desarrollo y pruebas:** SQLite mediante `DIRECTORY_DB_PATH`.
 - **Producción:** PostgreSQL mediante `DATABASE_URL`; Docker Compose crea y persiste un PostgreSQL propio.
-- **Navegación de casas:** el selector redirige el navegador a `edgeHostname`; nunca entrega el token del Directorio ni implementa SSO contra HomePilot Edge.
+- **Navegación de casas:** el selector usa rutas internas `/homes/:homeId` del mismo dominio y opera mediante el Gateway; no muestra ni solicita hostnames de Edge.
 
 ## Desarrollo
 

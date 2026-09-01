@@ -13,7 +13,7 @@
 
 - [ ] Convertir el selector a rutas internas `/homes/:homeId` de dominio único.
 - [ ] Aplicar membresía y rol por hogar en cada solicitud gateway.
-- [ ] Eliminar de UI la edición/exposición de hostname de Edge para nuevos hogares.
+- [x] Eliminar de UI la edición/exposición de hostname de Edge para nuevos hogares, conservando el campo solo como compatibilidad de persistencia.
 
 ## 3. Seguridad y calidad
 

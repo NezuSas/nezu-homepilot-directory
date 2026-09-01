@@ -63,7 +63,7 @@ en la red de su hogar. Ninguna caída de Cloud detiene automatizaciones locales.
 
 ## Migración
 
-1. Mantener `edgeHostname` y SSO V1 únicamente como compatibilidad de instalación.
+1. Mantener `edgeHostname` únicamente como dato de compatibilidad de instalaciones existentes; las nuevas casas no lo solicitan ni exponen en la UI.
 2. Instalar el conector saliente y emparejar el Edge sin activar el gateway para
    usuarios finales.
 3. Activar el hogar en Cloud, importar membresías con rol explícito y validar
