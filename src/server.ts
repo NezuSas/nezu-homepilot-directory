@@ -86,7 +86,21 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
     const accountId = (request as AuthenticatedRequest).accountId;
     const homeId = (request.params as { homeId: string }).homeId;
     const response = await relayHomeOperation(accountId, homeId, 'devices.read');
-    return response.payload ?? { devices: [] };
+    return (response.payload as { devices?: unknown[] } | undefined)?.devices ?? [];
+  });
+  app.get('/homes/:homeId/api/v1/homes', { preHandler: authenticated }, async request => {
+    const accountId = (request as AuthenticatedRequest).accountId;
+    const homeId = (request.params as { homeId: string }).homeId;
+    const home = await directory.getHome(accountId, homeId);
+    return [{ id: home.id, name: home.name }];
+  });
+  app.get('/homes/:homeId/api/v1/rooms', { preHandler: authenticated }, async request => {
+    await directory.getHome((request as AuthenticatedRequest).accountId, (request.params as { homeId: string }).homeId);
+    return [];
+  });
+  app.get('/homes/:homeId/api/v1/system/setup-status', { preHandler: authenticated }, async request => {
+    await directory.getHome((request as AuthenticatedRequest).accountId, (request.params as { homeId: string }).homeId);
+    return { isInitialized: true, requiresOnboarding: false, hasAdminUser: true, hasHAConfig: true, haConnectionValid: true, installationProfile: 'bridge_ha', requiresHomeAssistant: false, runtimeTarget: 'linux_edge', homeAssistantBridgeUrl: null, homeAssistantSetupUrl: null };
   });
   app.post('/homes/:homeId/api/v1/devices/:deviceId/command', { preHandler: authenticated }, async (request, reply) => {
     const accountId = (request as AuthenticatedRequest).accountId;
