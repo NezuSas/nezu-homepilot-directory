@@ -1,5 +1,5 @@
 export function homePath(edgeHostname) {
-  return new URL('/sso/directory', edgeHostname).toString();
+  return new URL('/api/v1/auth/sso/directory/browser', edgeHostname).toString();
 }
 
 /**
