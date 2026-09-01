@@ -5,7 +5,14 @@ const state={token:localStorage.getItem('directory_token'),homes:[],selectedHome
 const q=(selector)=>document.querySelector(selector); const notice=(message)=>q('#notice').textContent=message==='EMAIL_NOT_VERIFIED'?'Verifica tu correo: revisa el enlace enviado a tu email antes de continuar.':message;
 async function api(path,options={}){const headers=buildApiHeaders(Boolean(options.body),state.token);const response=await fetch(path,{...options,headers});if(response.status===204)return null;const body=await response.json();if(!response.ok)throw new Error(body.error||'REQUEST_FAILED');return body;}
 function setTab(tab){q('#login').hidden=tab!=='login';q('#register').hidden=tab!=='register';const recoveryForm=q('#password-reset-request');if(recoveryForm)recoveryForm.hidden=tab!=='login';document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('active',button.dataset.tab===tab));}
-function enterHomeFromSelector(home){ enterHome(home.id); }
+async function enterHomeFromSelector(home){
+  try {
+    const result=await api(/directory/homes//sso-token,{method:'POST'});
+    enterHome(home,result.token);
+  } catch(error) {
+    notice(error.message==='EDGE_NOT_PAIRED'?'Esta casa todavía no está conectada a su HomePilot.':error.message);
+  }
+}
 async function loadHomes(){state.homes=await api('/directory/homes');q('#auth').hidden=true;q('#homes').hidden=false;q('#logout').hidden=false;const list=q('#home-list');list.innerHTML='';if(!state.homes.length){list.innerHTML='<p>Aún no tienes casas registradas.</p>';return;}for(const home of state.homes){const article=document.createElement('article');article.className='home-card';article.innerHTML=`<div><h2>${escapeHtml(home.name)}</h2><small>${home.role==='owner'?'Propietario':'Miembro'}</small></div><button>Entrar</button>`;article.querySelector('button').onclick=()=>enterHomeFromSelector(home);article.querySelector('div').onclick=()=>selectHome(home);list.append(article);}}
 async function selectHome(home){state.selectedHome=home;q('#owner-panel').hidden=home.role!=='owner';q('#invite-result').textContent='';if(home.role!=='owner')return;const members=await api(`/directory/homes/${home.id}/memberships`);const list=q('#member-list');list.innerHTML=members.map(member=>`<div class="member"><span>${escapeHtml(member.displayName)} · ${escapeHtml(member.email)} · ${member.status}</span>${member.role==='member'&&member.status!=='revoked'?`<button data-account="${member.accountId}">Revocar</button>`:''}</div>`).join('');list.querySelectorAll('button[data-account]').forEach(button=>button.onclick=async()=>{try{await api(`/directory/homes/${home.id}/memberships/${button.dataset.account}`,{method:'DELETE'});await selectHome(home);notice('Acceso revocado.');}catch(error){notice(error.message);}});}
 q('#login').onsubmit=async(event)=>{event.preventDefault();const data=Object.fromEntries(new FormData(event.currentTarget));try{const result=await api('/directory/session',{method:'POST',body:JSON.stringify(data)});state.token=result.token;localStorage.setItem('directory_token',result.token);await loadHomes();}catch(error){notice(error.message);}};
@@ -27,10 +34,9 @@ async function respondToInvitation(decision) {
 }q('#invitation-response').onsubmit=async(event)=>{event.preventDefault();await respondToInvitation('accept');};
 q('#reject-invitation').onclick=()=>respondToInvitation('reject');
 q('#invite-form').onsubmit=async(event)=>{event.preventDefault();if(!state.selectedHome)return;const form=event.currentTarget;try{const invitation=await api(`/directory/homes/${state.selectedHome.id}/invitations`,{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(form)))});q('#invite-result').textContent=`Invitación creada. Token para entregar de forma segura: ${invitation.token}`;form.reset();await selectHome(state.selectedHome);}catch(error){notice(error.message);}};
-q('#pair-edge').onclick=async()=>{if(!state.selectedHome||state.selectedHome.role!=='owner')return;const output=q('#edge-credential');output.textContent='Generando código seguro…';try{const connection=await api(`/directory/homes/${state.selectedHome.id}/edge-pairing-code`,{method:'POST'});output.textContent=`C�digo: ${connection.code}\nVence: ${new Date(connection.expiresAt).toLocaleString()}\nIngresa o escanea este c�digo en la MiniPC.`;notice('Comparte �nicamente este c�digo con el instalador.');}catch(error){output.textContent='';notice(error.message);}};q('#logout').onclick=()=>{localStorage.removeItem('directory_token');state.token=null;state.selectedHome=null;q('#homes').hidden=true;q('#auth').hidden=false;q('#logout').hidden=true;};document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>setTab(button.dataset.tab));
+q('#pair-edge').onclick=async()=>{if(!state.selectedHome||state.selectedHome.role!=='owner')return;const output=q('#edge-credential');output.textContent='Generando código seguro…';try{const connection=await api(`/directory/homes/${state.selectedHome.id}/edge-pairing-code`,{method:'POST'});output.textContent=`C�digo: ${connection.code}\nVence: ${new Date(connection.expiresAt).toLocaleString()}\nIngresa o escanea este c�digo en la MiniPC.`;notice('Comparte �nicamente este c�digo con el instalador.');}catch(error){output.textContent='';notice(error.message);}};q('#logout').onclick=()=>{localStorage.removeItem('directory_token');state.token=null;state.selectedHome=null;q('#homes').hidden=true;q('#auth').hidden=false;q('#logout').hidden=true;};document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>setTab(button.dataset.tab));
 const escapeHtml=(value)=>String(value).replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
-const homeRoute = window.location.pathname.match(/^\/homes\/([^/]+)$/);
-if(state.token&&!homeRoute)loadHomes().catch(()=>q('#logout').click());
+if(state.token)loadHomes().catch(()=>q('#logout').click());
 
 const query = new URLSearchParams(window.location.search);
 const recovery = document.createElement('form');
@@ -68,19 +74,3 @@ if (query.has('reset')) {
   };
 }
 
-if (homeRoute) {
-  const homeId = decodeURIComponent(homeRoute[1]);
-  q('#auth').hidden = true;
-  q('#homes').hidden = false;
-  q('#logout').hidden = false;
-  q('#home-list').innerHTML = '<section id="cloud-home"><h2>Mi hogar</h2><p id="cloud-home-status">Conectando con tu hogar…</p><div id="cloud-dashboards"></div><div id="cloud-devices"></div></section>';
-  const render = (payload) => {
-    const dashboards = Array.isArray(payload?.dashboards) ? payload.dashboards : [];
-    const devices = Array.isArray(payload?.devices) ? payload.devices : [];
-    q('#cloud-dashboards').innerHTML = dashboards.map(item => `<article><h3>${escapeHtml(item.title)}</h3><p>${(item.tabs || []).map(tab => escapeHtml(tab.title)).join(' · ')}</p></article>`).join('');
-    q('#cloud-devices').innerHTML = devices.map(item => `<article><h3>${escapeHtml(item.name)}</h3><p>${escapeHtml(item.type)} · ${item.isOnline ? 'Disponible' : 'Sin conexión'}</p></article>`).join('');
-  };
-  Promise.all([api(`/homes/${encodeURIComponent(homeId)}/gateway/dashboard.read`, { method: 'POST' }), api(`/homes/${encodeURIComponent(homeId)}/gateway/devices.read`, { method: 'POST' })])
-    .then(([dashboards, devices]) => { render({ dashboards: dashboards.payload?.dashboards, devices: devices.payload?.devices }); q('#cloud-home-status').textContent = 'Hogar conectado.'; })
-    .catch(error => { q('#cloud-home-status').textContent = error.message === 'EDGE_OFFLINE' ? 'Tu hogar está temporalmente sin conexión. El control local sigue disponible.' : 'No fue posible cargar este hogar.'; });
-}

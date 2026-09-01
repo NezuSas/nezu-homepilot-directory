@@ -11,7 +11,7 @@ export interface DirectoryStore {
   createAccountToken(token: DirectoryAccountToken): Promise<void>; findAccountTokenByHash(hash: string): Promise<DirectoryAccountToken | null>; consumeAccountToken(id: string, now: string): Promise<boolean>; updateAccount(account: DirectoryAccount): Promise<void>;
   append(event: { id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string }): Promise<void>; listForHome(homeId: string): Promise<Array<{ id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string }> >;
   createEdgeConnection(connection: DirectoryEdgeConnection): Promise<void>; findActiveByHomeId(homeId: string): Promise<DirectoryEdgeConnection | null>; findActiveByEdgeId(edgeId: string): Promise<DirectoryEdgeConnection | null>; revoke(id: string, revokedAt: string): Promise<boolean>;
-  invalidatePairingCodes(homeId:string, now:string): Promise<void>; createPairingCode(value: DirectoryPairingCode): Promise<void>; claimPairingCode(hash:string, now:string, connection:DirectoryEdgeConnection): Promise<'claimed'|'invalid'|'used'|'expired'>;
+  invalidatePairingCodes(homeId:string, now:string): Promise<void>; createPairingCode(value: DirectoryPairingCode): Promise<void>; claimPairingCode(hash:string, now:string, connection:DirectoryEdgeConnection, edgeHostname:string): Promise<'claimed'|'invalid'|'used'|'expired'>;
 }
 
 export class DirectoryService {
@@ -73,9 +73,12 @@ export class DirectoryService {
     await this.requireOwner(actorId,homeId); const code=randomBytes(18).toString('base64url'); const now=clockNow(); const expiresAt=new Date(Date.now()+ttlMs).toISOString();
     await this.store.invalidatePairingCodes(homeId, now); await this.store.createPairingCode({id:randomUUID(),homeId,codeHash:hashPairingCode(code),expiresAt,usedAt:null,createdAt:now}); await this.audit(actorId,homeId,null,'edge.pairing.code.created'); return {code,expiresAt};
   }
-  async claimPairingCode(code:string):Promise<{homeId:string;edgeId:string;token:string}>{
-    if(!code||code.length>256) throw new ValidationError('EDGE_PAIRING_INVALID'); const edgeId=randomUUID(); const token=`${edgeId}.${randomBytes(32).toString('base64url')}`; const connection:DirectoryEdgeConnection={id:randomUUID(),homeId:'',edgeId,credentialHash:hashEdgeCredential(token),createdAt:clockNow(),revokedAt:null};
-    const outcome=await this.store.claimPairingCode(hashPairingCode(code),connection.createdAt,connection); if(outcome!=='claimed') throw new ValidationError(outcome==='expired'?'EDGE_PAIRING_EXPIRED':outcome==='used'?'EDGE_PAIRING_USED':'EDGE_PAIRING_INVALID'); await this.audit('edge-installer',connection.homeId,null,'edge.connection.claimed'); return {homeId:connection.homeId,edgeId,token};
+  async claimPairingCode(code:string, edgeHostname:string):Promise<{homeId:string;edgeId:string;token:string}>{
+    if(!code||code.length>256) throw new ValidationError('EDGE_PAIRING_INVALID');
+    const normalizedHostname=normalizeEdgeHostname(edgeHostname);
+    if (!new URL(normalizedHostname).hostname.endsWith('.nezuecuador.com')) throw new ValidationError('EDGE_HOSTNAME_INVALID');
+    const edgeId=randomUUID(); const token=`${edgeId}.${randomBytes(32).toString('base64url')}`; const connection:DirectoryEdgeConnection={id:randomUUID(),homeId:'',edgeId,credentialHash:hashEdgeCredential(token),createdAt:clockNow(),revokedAt:null};
+    const outcome=await this.store.claimPairingCode(hashPairingCode(code),connection.createdAt,connection,normalizedHostname); if(outcome!=='claimed') throw new ValidationError(outcome==='expired'?'EDGE_PAIRING_EXPIRED':outcome==='used'?'EDGE_PAIRING_USED':'EDGE_PAIRING_INVALID'); await this.audit('edge-installer',connection.homeId,null,'edge.connection.claimed'); return {homeId:connection.homeId,edgeId,token};
   }
   async authenticateEdgeCredential(token: string): Promise<{ homeId: string; edgeId: string } | null> {
     const edgeId = token.split('.', 1)[0];

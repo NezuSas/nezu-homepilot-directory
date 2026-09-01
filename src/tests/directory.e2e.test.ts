@@ -159,6 +159,6 @@ it('creates a pairing code over HTTP and rejects a reused claim', async () => {
   const issued = await request(app, 'POST', `/directory/homes/${home.id}/edge-pairing-code`, {}, owner.token);
   expect(issued.statusCode).toBe(201);
   const code = (issued.json() as { code: string }).code;
-  expect((await request(app, 'POST', '/directory/edge-pairing/claim', { code })).statusCode).toBe(201);
-  expect((await request(app, 'POST', '/directory/edge-pairing/claim', { code })).statusCode).toBe(400);
+  expect((await request(app, 'POST', '/directory/edge-pairing/claim', { code, edgeHostname: 'https://homepilot-pairing.nezuecuador.com' })).statusCode).toBe(201);
+  expect((await request(app, 'POST', '/directory/edge-pairing/claim', { code, edgeHostname: 'https://homepilot-pairing.nezuecuador.com' })).statusCode).toBe(400);
 });

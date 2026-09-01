@@ -1,1 +1,0 @@
-import{a as e}from"./config-Y8W1GZtF.js";var t=e(`chevron-up`,[[`path`,{d:`m18 15-6-6-6 6`,key:`153udz`}]]);export{t};

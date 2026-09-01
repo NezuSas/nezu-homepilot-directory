@@ -1,11 +1,21 @@
-export function homePath(homeId) {
-  return `/homes/${encodeURIComponent(homeId)}/console`;
+export function homePath(edgeHostname) {
+  return new URL('/sso/directory', edgeHostname).toString();
 }
 
-export function enterHome(homeId, navigation = window.location) {
-  if (typeof window !== 'undefined') {
-    const token = window.localStorage.getItem('directory_token');
-    if (token) window.localStorage.setItem('hp_session_token', token);
-  }
-  navigation.assign(homePath(homeId));
+/**
+ * The Directory-issued assertion is delivered in a top-level POST body. It is
+ * deliberately not appended to the Cloudflare URL, history, Referer, or logs.
+ */
+export function enterHome(home, token, documentRef = document) {
+  const form = documentRef.createElement('form');
+  form.method = 'POST';
+  form.action = homePath(home.edgeHostname);
+  form.hidden = true;
+  const input = documentRef.createElement('input');
+  input.type = 'hidden';
+  input.name = 'token';
+  input.value = token;
+  form.append(input);
+  documentRef.body.append(form);
+  form.submit();
 }

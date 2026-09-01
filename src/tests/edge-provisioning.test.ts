@@ -15,9 +15,9 @@ describe('DirectoryService Edge provisioning', () => {
     await database.createMembership(createMembership({ homeId: home.id, accountId: owner.id, invitedByAccountId: null, role: 'owner' }, now));
     const directory = new DirectoryService(database);
 
-    const firstCode = await directory.createPairingCode(owner.id, home.id); const first = await directory.claimPairingCode(firstCode.code);
+    const firstCode = await directory.createPairingCode(owner.id, home.id); const first = await directory.claimPairingCode(firstCode.code, 'https://homepilot-provision.nezuecuador.com');
     expect(await directory.authenticateEdgeCredential(first.token)).toEqual({ homeId: home.id, edgeId: first.edgeId });
-    const secondCode = await directory.createPairingCode(owner.id, home.id); const second = await directory.claimPairingCode(secondCode.code);
+    const secondCode = await directory.createPairingCode(owner.id, home.id); const second = await directory.claimPairingCode(secondCode.code, 'https://homepilot-provision.nezuecuador.com');
     expect(await directory.authenticateEdgeCredential(first.token)).toBeNull();
     expect(await directory.authenticateEdgeCredential(second.token)).toEqual({ homeId: home.id, edgeId: second.edgeId });
     expect(second.token).not.toContain((await database.findActiveByHomeId(home.id))!.credentialHash);

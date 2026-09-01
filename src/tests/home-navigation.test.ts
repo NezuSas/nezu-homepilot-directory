@@ -1,14 +1,15 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { enterHome, homePath } from '../web/navigation.js';
 
 describe('home selector navigation', () => {
-  it('AC1 keeps an authorized selection on the same public domain route without any network request', () => {
-    const assign = vi.fn();
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    enterHome('home/with space', { assign });
-    expect(homePath('home/with space')).toBe('/homes/home%2Fwith%20space/console');
-    expect(assign).toHaveBeenCalledWith('/homes/home%2Fwith%20space/console');
-    expect(fetchSpy).not.toHaveBeenCalled();
-    fetchSpy.mockRestore();
+  it('posts the one-use SSO token to the selected Edge without putting it in the URL', () => {
+    const input = { type: '', name: '', value: '' };
+    const form = { method: '', action: '', hidden: false, append: () => undefined, submit: () => undefined };
+    const documentRef = { createElement: (name: string) => name === 'form' ? form : input, body: { append: () => undefined } };
+    enterHome({ edgeHostname: 'https://casa.example.com' }, 'short-lived token', documentRef as never);
+    expect(homePath('https://casa.example.com')).toBe('https://casa.example.com/sso/directory');
+    expect(form.method).toBe('POST');
+    expect(form.action).toBe('https://casa.example.com/sso/directory');
+    expect(input).toMatchObject({ name: 'token', value: 'short-lived token' });
   });
 });

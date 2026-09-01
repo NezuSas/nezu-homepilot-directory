@@ -3,9 +3,8 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import rateLimit from '@fastify/rate-limit';
 import { fileURLToPath } from 'node:url';
-import crypto from 'node:crypto';
 import { dirname, join } from 'node:path';
-import { AuthenticationError, ConflictError, DomainError, ForbiddenError, NotFoundError, ValidationError } from './domain/entities.js';
+import { AuthenticationError, ConflictError, DomainError, ForbiddenError, NotFoundError, UNPAIRED_EDGE_HOSTNAME, ValidationError } from './domain/entities.js';
 import { DirectoryService, type DirectoryStore } from './application/DirectoryService.js';
 import { DirectorySsoIssuer } from './application/DirectorySsoIssuer.js';
 import { DirectorySessionService } from './application/DirectorySessionService.js';
@@ -60,70 +59,8 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   });
   app.post('/directory/password-reset/request', async (request, reply) => { const body = request.body as { email?: unknown }; if (typeof body?.email !== 'string') throw new ValidationError('INVALID_BODY'); await directory.requestPasswordReset(body.email); reply.code(202).send({ status: 'accepted' }); });
   app.post('/directory/password-reset/:token/confirm', async request => { const body = request.body as { password?: unknown }; if (typeof body?.password !== 'string') throw new ValidationError('INVALID_BODY'); await directory.confirmPasswordReset((request.params as { token: string }).token, body.password); return { status: 'confirmed' }; });
-  app.post('/directory/accounts/verify-email/:token', async request => { await directory.verifyEmail((request.params as { token: string }).token); return { status: 'verified' }; });  app.post('/directory/homes/:homeId/sso-token', { preHandler: authenticated }, async (request, reply) => { if (!ssoIssuer) return reply.code(503).send({ error: 'SSO_NOT_CONFIGURED' }); const accountId = (request as AuthenticatedRequest).accountId; const homeId = (request.params as { homeId: string }).homeId; await directory.getHome(accountId, homeId); return { token: ssoIssuer.issue(accountId, homeId) }; });
+  app.post('/directory/accounts/verify-email/:token', async request => { await directory.verifyEmail((request.params as { token: string }).token); return { status: 'verified' }; });  app.post('/directory/homes/:homeId/sso-token', { preHandler: authenticated }, async (request, reply) => { if (!ssoIssuer) return reply.code(503).send({ error: 'SSO_NOT_CONFIGURED' }); const accountId = (request as AuthenticatedRequest).accountId; const homeId = (request.params as { homeId: string }).homeId; const home = await directory.getHome(accountId, homeId); if (home.edgeHostname === UNPAIRED_EDGE_HOSTNAME) throw new ConflictError('EDGE_NOT_PAIRED'); return { token: ssoIssuer.issue(accountId, homeId) }; });
   app.get('/directory/homes',{preHandler:authenticated},async(request)=>directory.listHomes((request as AuthenticatedRequest).accountId));
-  const relayHomeOperation = async (accountId: string, homeId: string, operation: import('./application/CloudGatewayProtocol.js').RelayOperation, input?: unknown) => {
-    const membership = (await directory.listHomes(accountId)).find(home => home.id === homeId);
-    if (!membership) throw new ForbiddenError('HOME_ACCESS_FORBIDDEN');
-    const edge = await database.findActiveByHomeId(homeId);
-    if (!edge) throw new CloudGatewayRegistryError('EDGE_OFFLINE');
-    return gatewayRegistry.request({ homeId, edgeId: edge.edgeId }, { accountId, role: membership.role }, crypto.randomUUID(), operation, new Date(Date.now() + 10_000).toISOString(), input);
-  };
-  app.get('/homes/:homeId/api/v1/auth/me', { preHandler: authenticated }, async request => {
-    const accountId = (request as AuthenticatedRequest).accountId;
-    const homeId = (request.params as { homeId: string }).homeId;
-    const membership = (await directory.listHomes(accountId)).find(home => home.id === homeId);
-    if (!membership) throw new ForbiddenError('HOME_ACCESS_FORBIDDEN');
-    const account = await database.findAccountById(accountId);
-    if (!account) throw new AuthenticationError('ACCOUNT_NOT_FOUND');
-    return { id: account.id, username: account.email, role: membership.role === 'owner' ? 'parent' : 'guest', displayName: account.displayName, avatarDataUri: null };
-  });  app.get('/homes/:homeId/api/v1/dashboards', { preHandler: authenticated }, async request => {
-    const accountId = (request as AuthenticatedRequest).accountId;
-    const homeId = (request.params as { homeId: string }).homeId;
-    const response = await relayHomeOperation(accountId, homeId, 'dashboard.read');
-    return (response.payload as { dashboards?: unknown[] } | undefined)?.dashboards ?? [];
-  });  app.get('/homes/:homeId/api/v1/devices', { preHandler: authenticated }, async request => {
-    const accountId = (request as AuthenticatedRequest).accountId;
-    const homeId = (request.params as { homeId: string }).homeId;
-    const response = await relayHomeOperation(accountId, homeId, 'devices.read');
-    return (response.payload as { devices?: unknown[] } | undefined)?.devices ?? [];
-  });
-  app.get('/homes/:homeId/api/v1/homes', { preHandler: authenticated }, async request => {
-    const accountId = (request as AuthenticatedRequest).accountId;
-    const homeId = (request.params as { homeId: string }).homeId;
-    const home = await directory.getHome(accountId, homeId);
-    return [{ id: home.id, name: home.name }];
-  });
-  app.get('/homes/:homeId/api/v1/rooms', { preHandler: authenticated }, async request => {
-    await directory.getHome((request as AuthenticatedRequest).accountId, (request.params as { homeId: string }).homeId);
-    return [];
-  });
-  app.get('/homes/:homeId/api/v1/system/setup-status', { preHandler: authenticated }, async request => {
-    await directory.getHome((request as AuthenticatedRequest).accountId, (request.params as { homeId: string }).homeId);
-    return { isInitialized: true, requiresOnboarding: false, hasAdminUser: true, hasHAConfig: true, haConnectionValid: true, installationProfile: 'bridge_ha', requiresHomeAssistant: false, runtimeTarget: 'linux_edge', homeAssistantBridgeUrl: null, homeAssistantSetupUrl: null };
-  });
-  app.post('/homes/:homeId/api/v1/devices/:deviceId/command', { preHandler: authenticated }, async (request, reply) => {
-    const accountId = (request as AuthenticatedRequest).accountId;
-    const { homeId, deviceId } = request.params as { homeId: string; deviceId: string };
-    const body = request.body as { command?: unknown };
-    const rawCommand = body?.command;
-    const command = typeof rawCommand === 'string' ? rawCommand : rawCommand && typeof rawCommand === 'object' && typeof (rawCommand as { name?: unknown }).name === 'string' ? (rawCommand as { name: string }).name : null;
-    const params = rawCommand && typeof rawCommand === 'object' && !Array.isArray(rawCommand) && (rawCommand as { params?: unknown }).params && typeof (rawCommand as { params?: unknown }).params === 'object' ? (rawCommand as { params: Record<string, unknown> }).params : {};
-    if (!command) throw new ValidationError('INVALID_BODY');
-    const commandResult = await relayHomeOperation(accountId, homeId, 'device.command', { deviceId, command, params });
-    if (commandResult.status >= 400) return reply.code(commandResult.status).send(commandResult.payload ?? { error: 'COMMAND_FAILED' });
-    const devices = await relayHomeOperation(accountId, homeId, 'devices.read');
-    const device = (devices.payload as { devices?: Array<{ id?: string }> } | undefined)?.devices?.find(item => item.id === deviceId);
-    return reply.code(200).send(device ?? { id: deviceId });
-  });  app.post('/homes/:homeId/gateway/:operation',{preHandler:authenticated},async(request, reply)=>{
-    const accountId=(request as AuthenticatedRequest).accountId; const homeId=(request.params as {homeId:string}).homeId; const operation=(request.params as {operation:string}).operation;
-    const membership=(await directory.listHomes(accountId)).find(home=>home.id===homeId);
-    if(!membership) throw new ForbiddenError('HOME_ACCESS_FORBIDDEN');
-    if(operation!=='dashboard.read'&&operation!=='devices.read'&&operation!=='device.command') throw new ValidationError('GATEWAY_OPERATION_FORBIDDEN');
-    const edge=await database.findActiveByHomeId(homeId); if(!edge) return reply.code(503).send({error:'EDGE_OFFLINE'});
-    const response=await gatewayRegistry.request({homeId,edgeId:edge.edgeId},{accountId,role:membership.role},crypto.randomUUID(),operation as import('./application/CloudGatewayProtocol.js').RelayOperation,new Date(Date.now()+10_000).toISOString(),request.body);
-    reply.code(response.status).send({status:response.status,payload:response.payload});
-  });
   const edgeGatewayIdentity = async (request: FastifyRequest): Promise<import('./application/CloudGatewayProtocol.js').RelayIdentity> => {
     const token = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7).trim() : '';
     const identity = token ? await directory.authenticateEdgeCredential(token) : null;
@@ -141,7 +78,7 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
     reply.code(204).send();
   });
   app.post('/directory/homes/:homeId/edge-pairing-code',{preHandler:authenticated},async(request, reply)=>{ const pairing=await directory.createPairingCode((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId); reply.code(201).send(pairing); });
-  app.register(async pairingRoutes => { await pairingRoutes.register(rateLimit,{max:5,timeWindow:'1 minute'}); pairingRoutes.post('/directory/edge-pairing/claim',async(request,reply)=>{const code=(request.body as {code?:unknown})?.code;if(typeof code!=='string')throw new ValidationError('INVALID_BODY');const edge=await directory.claimPairingCode(code);reply.code(201).send({...edge,gatewayUrl:(process.env.PUBLIC_APP_URL ?? 'https://accounts.nezuecuador.com').replace(/^https:/,'wss:') + '/gateway/edge'});}); });
+  app.register(async pairingRoutes => { await pairingRoutes.register(rateLimit,{max:5,timeWindow:'1 minute'}); pairingRoutes.post('/directory/edge-pairing/claim',async(request,reply)=>{const body=request.body as {code?:unknown;edgeHostname?:unknown};if(typeof body?.code!=='string'||typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');const edge=await directory.claimPairingCode(body.code,body.edgeHostname);reply.code(201).send({...edge,gatewayUrl:(process.env.PUBLIC_APP_URL ?? 'https://accounts.nezuecuador.com').replace(/^https:/,'wss:') + '/gateway/edge'});}); });
   app.post('/directory/homes',{preHandler:authenticated},async(request,reply)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(typeof body?.name!=='string'||body.edgeHostname!==undefined&&typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');const home=await directory.registerHome((request as AuthenticatedRequest).accountId,{name:body.name,edgeHostname:body.edgeHostname});reply.code(201).send(home);});
   app.get('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>directory.getHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId));
   app.patch('/directory/homes/:homeId',{preHandler:authenticated},async(request)=>{const body=request.body as {name?:unknown;edgeHostname?:unknown};if(body.name!==undefined&&typeof body.name!=='string'||body.edgeHostname!==undefined&&typeof body.edgeHostname!=='string')throw new ValidationError('INVALID_BODY');return directory.updateHome((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId,{name:body.name as string | undefined,edgeHostname:body.edgeHostname as string | undefined});});
@@ -152,7 +89,7 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   app.post('/directory/invitations/:token/reject',{preHandler:authenticated},async(request)=>directory.rejectInvitation((request as AuthenticatedRequest).accountId,(request.params as {token:string}).token));
   app.delete('/directory/homes/:homeId/memberships/:accountId',{preHandler:authenticated},async(request,reply)=>{const params=request.params as {homeId:string;accountId:string};await directory.revokeMembership((request as AuthenticatedRequest).accountId,params.homeId,params.accountId);reply.code(204).send();});
   app.get('/directory/homes/:homeId/audit',{preHandler:authenticated},async(request)=>directory.listAudit((request as AuthenticatedRequest).accountId,(request.params as {homeId:string}).homeId));
-  if(options.serveWeb!==false){ const here=dirname(fileURLToPath(import.meta.url)); app.register(fastifyStatic,{root:join(here,'web'),prefix:'/'}); app.get('/',async(_request,reply)=>reply.sendFile('index.html')); app.get('/homes/:homeId',async(_request,reply)=>reply.sendFile('index.html')); app.get('/homes/:homeId/console',async(_request,reply)=>reply.sendFile('console/index.html')); app.get('/homes/:homeId/console/*',async(_request,reply)=>reply.sendFile('console/index.html')); }
+  if(options.serveWeb!==false){ const here=dirname(fileURLToPath(import.meta.url)); app.register(fastifyStatic,{root:join(here,'web'),prefix:'/'}); app.get('/',async(_request,reply)=>reply.sendFile('index.html')); app.get('/homes/:homeId',async(_request,reply)=>reply.sendFile('index.html')); }
   return app;
 }
 
