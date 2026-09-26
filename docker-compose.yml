@@ -17,7 +17,7 @@ services:
   homepilot-directory:
     build: .
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
     environment:
       PORT: "3100"
       DIRECTORY_JWT_SECRET: ${DIRECTORY_JWT_SECRET:?Set DIRECTORY_JWT_SECRET in .env}
