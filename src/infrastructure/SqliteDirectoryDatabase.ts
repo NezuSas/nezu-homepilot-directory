@@ -6,7 +6,7 @@ import type { AccountTokenPurpose, AuditEvent, DirectoryAccount, DirectoryAccoun
 
 export class SqliteDirectoryDatabase {
   readonly db: Database.Database;
-  constructor(path: string) { if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true }); this.db = new Database(path); this.db.pragma('foreign_keys = ON'); this.migrate(); }
+  constructor(path: string) { if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true }); this.db = new Database(path); try { this.db.pragma('foreign_keys = ON'); this.migrate(); } catch (error) { this.db.close(); throw error; } }
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS directory_accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, email_verified INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
@@ -18,6 +18,9 @@ export class SqliteDirectoryDatabase {
       CREATE TABLE IF NOT EXISTS directory_account_tokens (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES directory_accounts(id) ON DELETE CASCADE, purpose TEXT NOT NULL CHECK(purpose IN ('email_verify','password_reset')), token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS directory_edge_connections (id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES directory_homes(id) ON DELETE CASCADE, edge_id TEXT NOT NULL UNIQUE, credential_hash TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT); CREATE TABLE IF NOT EXISTS directory_pairing_codes (id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES directory_homes(id) ON DELETE CASCADE, code_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL);
     `);
+    const duplicate = this.db.prepare('SELECT home_id FROM directory_edge_connections WHERE revoked_at IS NULL GROUP BY home_id HAVING COUNT(*) > 1 LIMIT 1').get() as { home_id: string } | undefined;
+    if (duplicate) throw new Error(`Multiple active Edges for home ${duplicate.home_id}; resolve before migration.`);
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS ux_edge_connections_active_home ON directory_edge_connections(home_id) WHERE revoked_at IS NULL');
   }
   async createAccount(account: DirectoryAccount): Promise<void> { this.db.prepare('INSERT INTO directory_accounts (id,email,password_hash,display_name,created_at) VALUES (?, ?, ?, ?, ?)').run(account.id, account.email, account.passwordHash, account.displayName, account.createdAt); }
   async findAccountByEmail(email: string): Promise<DirectoryAccount | null> { const row = this.db.prepare('SELECT * FROM directory_accounts WHERE email = ?').get(email) as AccountRow | undefined; return row ? account(row) : null; }

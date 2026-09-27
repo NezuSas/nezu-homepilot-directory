@@ -82,3 +82,17 @@ curl https://accounts.nezuecuador.com/directory/sso/public-key
 ```
 
 Configura el PEM devuelto como `DIRECTORY_SSO_PUBLIC_KEY` en ese Edge y reinicialo. El Directorio no contacta ningun Edge: el navegador transporta el token firmado, que vence a los 60 segundos.
+
+## Edge Attestation v1
+
+Directory firma una prueba de que un Edge activo y autenticado presentó un challenge para vincular una `HomePilotInstallation` en IntentFlow. Esta capacidad usa una clave Ed25519 independiente de `DIRECTORY_SSO_PRIVATE_KEY`. Genera un par nuevo con `npm run generate:edge-attestation-keys` y configura el PEM privado como `DIRECTORY_EDGE_ATTESTATION_PRIVATE_KEY` exclusivamente en Directory. No incluyas claves reales en el repositorio. Directory puede arrancar sin esta variable; los dos endpoints de attestation responden `503 EDGE_ATTESTATION_NOT_CONFIGURED` hasta configurarla.
+
+`POST /directory/edge-attestation` requiere `Authorization: Bearer <edge credential>` y exactamente `{ "installationId": "<uuid>", "challengeId": "<uuid>", "nonce": "<base64url>" }`. El nonce debe ser la codificación base64url sin padding de 32 bytes (43 caracteres). La respuesta es `{ "attestation": "<payload64>.<signature64>", "expiresIn": 90 }`. Directory valida la credencial mediante `authenticateEdgeCredential`; `directoryHomeId` y `directoryEdgeId` provienen únicamente de esa identidad. Una credencial revocada no puede emitir attestations. La emisión se limita a 10 por minuto por Edge y se audita como `edge.attestation.issued` asociado al homeId, sin guardar nonce, firma ni jti.
+
+El payload JSON firmado contiene exactamente `type: "homepilot.edge-attestation.v1"`, `issuer: "homepilot-directory"`, `audience: "intentflow"`, `keyId: "edge-attestation-v1"`, `installationId`, `challengeId`, `nonce`, `directoryHomeId`, `directoryEdgeId`, `iat`, `exp` y `jti`. `iat` y `exp` son segundos Unix; `exp = iat + 90`; `jti` es un UUID criptográficamente aleatorio. La firma Ed25519 cubre los bytes ASCII de `payload64`. `GET /directory/edge-attestation/public-key` publica `{ type, algorithm: "Ed25519", keyId, publicKey }` con el PEM público.
+
+Cada Home admite como máximo un Edge activo (`revoked_at IS NULL`), impuesto por un índice único parcial en SQLite y PostgreSQL. Los Edges revocados permanecen como historial; el re-pairing revoca el anterior antes de crear el nuevo. Una migración con varios Edges activos para el mismo Home falla y requiere resolver esos datos antes de continuar.
+
+Directory comprueba la sintaxis del challenge y firma el contexto que presentó el Edge autenticado. IntentFlow deberá comprobar posteriormente que el challenge existe, pertenece a la instalación, no expiró, coincide con el nonce, y se consume una sola vez; también deberá verificar firma, audiencia, emisor, clave, identidad Edge y plazo de la attestation.
+
+El límite de 10 emisiones por minuto usa memoria del proceso Directory. Una instalación con varias réplicas necesita un limitador compartido para conservar ese máximo global. La prueba de PostgreSQL se habilita con `DIRECTORY_TEST_DATABASE_URL` apuntando a una base aislada para pruebas.

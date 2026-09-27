@@ -9,7 +9,8 @@
     "build": "tsc && node scripts/copy-web.mjs",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "generate:sso-keys": "node scripts/generate-sso-keys.mjs"
+    "generate:sso-keys": "node scripts/generate-sso-keys.mjs",
+    "generate:edge-attestation-keys": "node scripts/generate-edge-attestation-keys.mjs"
   },
   "keywords": [],
   "author": "",

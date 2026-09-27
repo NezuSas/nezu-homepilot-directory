@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { AuthenticationError, ConflictError, DomainError, ForbiddenError, NotFoundError, UNPAIRED_EDGE_HOSTNAME, ValidationError } from './domain/entities.js';
 import { DirectoryService, type DirectoryStore } from './application/DirectoryService.js';
 import { DirectorySsoIssuer } from './application/DirectorySsoIssuer.js';
+import { EdgeAttestationIssuer, EDGE_ATTESTATION_KEY_ID, EDGE_ATTESTATION_TTL_SECONDS, EDGE_ATTESTATION_TYPE, validateEdgeAttestationChallenge } from './application/EdgeAttestationIssuer.js';
 import { DirectorySessionService } from './application/DirectorySessionService.js';
 import { SqliteDirectoryDatabase } from './infrastructure/SqliteDirectoryDatabase.js';
 import { createEmailSenderFromEnvironment } from './infrastructure/EmailSenderFactory.js';
@@ -25,6 +26,8 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   const authRateLimitMax = parsePositiveInteger(process.env.DIRECTORY_AUTH_RATE_LIMIT_MAX, 10);
   const directory = new DirectoryService(database, options.invitationTtlMs, options.emailSender ?? createEmailSenderFromEnvironment(), options.publicAppUrl ?? process.env.PUBLIC_APP_URL ?? 'http://localhost:3100');
   const ssoIssuer = DirectorySsoIssuer.fromEnvironment();
+  const edgeAttestationIssuer = EdgeAttestationIssuer.fromEnvironment();
+  const edgeAttestationAttempts = new Map<string, number[]>();
   const app = Fastify({logger:false});
   const gatewayRegistry = new CloudGatewayRegistry();
   const cloudGateway = new CloudGatewaySocketServer(gatewayRegistry, {
@@ -42,6 +45,31 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   });
   app.get('/health',async()=>({status:'ok'}));
   app.get('/directory/sso/public-key', async (_request, reply) => { if (!ssoIssuer) return reply.code(503).send({ error: 'SSO_NOT_CONFIGURED' }); return { publicKey: ssoIssuer.publicKey() }; });
+  app.get('/directory/edge-attestation/public-key', async (_request, reply) => {
+    if (!edgeAttestationIssuer) return reply.code(503).send({ error: 'EDGE_ATTESTATION_NOT_CONFIGURED' });
+    return { type: EDGE_ATTESTATION_TYPE, algorithm: 'Ed25519', keyId: EDGE_ATTESTATION_KEY_ID, publicKey: edgeAttestationIssuer.publicKey() };
+  });
+  app.post('/directory/edge-attestation', async (request, reply) => {
+    const authorization = request.headers.authorization;
+    const credential = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const identity = credential ? await directory.authenticateEdgeCredential(credential) : null;
+    if (!identity) throw new AuthenticationError('EDGE_CREDENTIAL_INVALID');
+    const challenge = validateEdgeAttestationChallenge(request.body);
+    if (!edgeAttestationIssuer) return reply.code(503).send({ error: 'EDGE_ATTESTATION_NOT_CONFIGURED' });
+    const now = Date.now();
+    for (const [edgeId, attempts] of edgeAttestationAttempts) {
+      const active = attempts.filter(timestamp => timestamp > now - 60_000);
+      if (active.length) edgeAttestationAttempts.set(edgeId, active);
+      else edgeAttestationAttempts.delete(edgeId);
+    }
+    const attempts = edgeAttestationAttempts.get(identity.edgeId) ?? [];
+    if (attempts.length >= 10) return reply.code(429).send({ error: 'RATE_LIMIT_EXCEEDED' });
+    attempts.push(now);
+    edgeAttestationAttempts.set(identity.edgeId, attempts);
+    const attestation = edgeAttestationIssuer.issue(challenge, identity);
+    await directory.auditEdgeAttestation(identity.homeId, identity.edgeId);
+    return { attestation, expiresIn: EDGE_ATTESTATION_TTL_SECONDS };
+  });
   app.register(async authRoutes => {
     await authRoutes.register(rateLimit, { max: authRateLimitMax, timeWindow: '1 minute' });
     authRoutes.post('/directory/accounts', async (request, reply) => {
