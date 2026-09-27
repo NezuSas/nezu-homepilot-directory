@@ -90,6 +90,9 @@ export class DirectoryService {
   async auditEdgeAttestation(homeId: string, edgeId: string): Promise<void> {
     await this.audit(`edge:${edgeId}`, homeId, null, 'edge.attestation.issued');
   }
+  async auditEdgeServiceToken(homeId: string, edgeId: string): Promise<void> {
+    await this.audit(`edge:${edgeId}`, homeId, null, 'edge.service_token.issued');
+  }
   private async sendToken(account: DirectoryAccount, purpose: AccountTokenPurpose, ttlMs: number): Promise<void> { const token = randomBytes(32).toString("base64url"); const entity: DirectoryAccountToken = { id: randomUUID(), accountId: account.id, purpose, tokenHash: hashInvitation(token), expiresAt: new Date(Date.now() + ttlMs).toISOString(), usedAt: null, createdAt: clockNow() }; await this.store.createAccountToken(entity); const parameter = purpose === "email_verify" ? "verify" : "reset"; const subject = purpose === "email_verify" ? "Verifica tu correo de HomePilot" : "Restablece tu contrasena de HomePilot"; try { await this.emailSender.send({ to: account.email, subject, text: this.publicAppUrl + "/?" + parameter + "=" + encodeURIComponent(token) }); } catch { } }
   private async validToken(token: string, purpose: AccountTokenPurpose): Promise<DirectoryAccountToken> { const value = await this.store.findAccountTokenByHash(hashInvitation(token)); if (!value || value.purpose !== purpose) throw new NotFoundError('TOKEN_NOT_FOUND'); if (value.usedAt) throw new ValidationError('TOKEN_ALREADY_USED'); if (Date.parse(value.expiresAt) <= Date.now()) throw new ValidationError('TOKEN_EXPIRED'); return value; }
   private async requireAccountValue(id: string): Promise<DirectoryAccount> { const account = await this.store.findAccountById(id); if (!account) throw new NotFoundError('ACCOUNT_NOT_FOUND'); return account; }  private async requireAccount(id:string):Promise<void>{if(!await this.store.findAccountById(id)) throw new AuthenticationError('ACCOUNT_NOT_FOUND');}

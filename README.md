@@ -96,3 +96,7 @@ Cada Home admite como máximo un Edge activo (`revoked_at IS NULL`), impuesto po
 Directory comprueba la sintaxis del challenge y firma el contexto que presentó el Edge autenticado. IntentFlow deberá comprobar posteriormente que el challenge existe, pertenece a la instalación, no expiró, coincide con el nonce, y se consume una sola vez; también deberá verificar firma, audiencia, emisor, clave, identidad Edge y plazo de la attestation.
 
 El límite de 10 emisiones por minuto usa memoria del proceso Directory. Una instalación con varias réplicas necesita un limitador compartido para conservar ese máximo global. La prueba de PostgreSQL se habilita con `DIRECTORY_TEST_DATABASE_URL` apuntando a una base aislada para pruebas.
+
+## Edge Service Token v1
+
+Un Edge activo puede solicitar `POST /directory/edge-service-token` con su Edge credential en `Authorization: Bearer` y sin cuerpo para recibir `{ "token": "<payload64>.<signature64>", "expiresIn": 120 }`. La respuesta incluye `Cache-Control: no-store`. El token Ed25519 solo autentica al Edge ante IntentFlow para `homepilot.manifest.read`; no representa a un usuario ni sustituye Edge Attestation. `GET /directory/edge-service-token/public-key` publica la clave pública. Configura una tercera clave privada Ed25519 PEM independiente en `DIRECTORY_EDGE_SERVICE_PRIVATE_KEY`; sin ella ambos endpoints responden `503 EDGE_SERVICE_TOKEN_NOT_CONFIGURED`. El contrato y los límites se detallan en `specs/edge-service-token-v1.md`.
