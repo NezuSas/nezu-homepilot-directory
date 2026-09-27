@@ -38,6 +38,20 @@ export class PostgresDirectoryDatabase implements DirectoryStore {
   async createEdgeConnection(value: DirectoryEdgeConnection): Promise<void> { await this.pool.query('INSERT INTO directory_edge_connections (id,home_id,edge_id,credential_hash,created_at,revoked_at) VALUES ($1,$2,$3,$4,$5,$6)',[value.id,value.homeId,value.edgeId,value.credentialHash,value.createdAt,value.revokedAt]); }
   async findActiveByHomeId(homeId: string): Promise<DirectoryEdgeConnection | null> { return mapEdgeConnection((await this.pool.query('SELECT * FROM directory_edge_connections WHERE home_id=$1 AND revoked_at IS NULL',[homeId])).rows[0]); }
   async findActiveByEdgeId(edgeId: string): Promise<DirectoryEdgeConnection | null> { return mapEdgeConnection((await this.pool.query('SELECT * FROM directory_edge_connections WHERE edge_id=$1 AND revoked_at IS NULL',[edgeId])).rows[0]); }
+  async rotateEdgeCredential(edgeId: string, expectedCredentialHash: string, newCredentialHash: string, auditEvent: AuditEvent): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const changed = await client.query('UPDATE directory_edge_connections SET credential_hash=$1 WHERE edge_id=$2 AND revoked_at IS NULL AND credential_hash=$3',[newCredentialHash,edgeId,expectedCredentialHash]);
+      if (changed.rowCount !== 1) { await client.query('ROLLBACK'); return false; }
+      await client.query('INSERT INTO directory_audit_events (id,actor_account_id,home_id,membership_id,action,created_at) VALUES ($1,$2,$3,$4,$5,$6)',[auditEvent.id,auditEvent.actorAccountId,auditEvent.homeId,auditEvent.membershipId,auditEvent.action,auditEvent.createdAt]);
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+  }
   async revoke(id: string, revokedAt: string): Promise<boolean> { return (await this.pool.query('UPDATE directory_edge_connections SET revoked_at=$1 WHERE id=$2 AND revoked_at IS NULL',[revokedAt,id])).rowCount===1; }
   async invalidatePairingCodes(homeId:string,now:string):Promise<void>{await this.pool.query('UPDATE directory_pairing_codes SET used_at=$1 WHERE home_id=$2 AND used_at IS NULL',[now,homeId]);}
   async createPairingCode(value:DirectoryPairingCode):Promise<void>{await this.pool.query('INSERT INTO directory_pairing_codes (id,home_id,code_hash,expires_at,used_at,created_at) VALUES ($1,$2,$3,$4,$5,$6)',[value.id,value.homeId,value.codeHash,value.expiresAt,value.usedAt,value.createdAt]);}

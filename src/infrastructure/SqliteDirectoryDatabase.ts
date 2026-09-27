@@ -43,6 +43,15 @@ export class SqliteDirectoryDatabase {
   async createEdgeConnection(value: DirectoryEdgeConnection): Promise<void> { this.db.prepare('INSERT INTO directory_edge_connections VALUES (?, ?, ?, ?, ?, ?)').run(value.id,value.homeId,value.edgeId,value.credentialHash,value.createdAt,value.revokedAt); }
   async findActiveByHomeId(homeId: string): Promise<DirectoryEdgeConnection | null> { const row=this.db.prepare('SELECT * FROM directory_edge_connections WHERE home_id=? AND revoked_at IS NULL').get(homeId) as EdgeConnectionRow|undefined; return row?edgeConnection(row):null; }
   async findActiveByEdgeId(edgeId: string): Promise<DirectoryEdgeConnection | null> { const row=this.db.prepare('SELECT * FROM directory_edge_connections WHERE edge_id=? AND revoked_at IS NULL').get(edgeId) as EdgeConnectionRow|undefined; return row?edgeConnection(row):null; }
+  async rotateEdgeCredential(edgeId: string, expectedCredentialHash: string, newCredentialHash: string, auditEvent: AuditEvent): Promise<boolean> {
+    const transaction = this.db.transaction(() => {
+      const changed = this.db.prepare('UPDATE directory_edge_connections SET credential_hash=? WHERE edge_id=? AND revoked_at IS NULL AND credential_hash=?').run(newCredentialHash,edgeId,expectedCredentialHash).changes;
+      if (changed !== 1) return false;
+      this.db.prepare('INSERT INTO directory_audit_events (id,actor_account_id,home_id,membership_id,action,created_at) VALUES (?,?,?,?,?,?)').run(auditEvent.id,auditEvent.actorAccountId,auditEvent.homeId,auditEvent.membershipId,auditEvent.action,auditEvent.createdAt);
+      return true;
+    });
+    return transaction();
+  }
   async revoke(id: string, revokedAt: string): Promise<boolean> { return this.db.prepare('UPDATE directory_edge_connections SET revoked_at=? WHERE id=? AND revoked_at IS NULL').run(revokedAt,id).changes===1; }
   async invalidatePairingCodes(homeId:string,now:string):Promise<void>{this.db.prepare('UPDATE directory_pairing_codes SET used_at=? WHERE home_id=? AND used_at IS NULL').run(now,homeId);}
   async createPairingCode(value:DirectoryPairingCode):Promise<void>{this.db.prepare('INSERT INTO directory_pairing_codes VALUES (?,?,?,?,?,?)').run(value.id,value.homeId,value.codeHash,value.expiresAt,value.usedAt,value.createdAt);}

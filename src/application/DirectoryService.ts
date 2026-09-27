@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { NoopEmailSender, type EmailSender } from './EmailSender.js';
-import type { AccountTokenPurpose, DirectoryAccount, DirectoryAccountToken, DirectoryEdgeConnection, DirectoryHome, DirectoryHomeMembership, DirectoryPairingCode } from '../domain/entities.js';
+import type { AccountTokenPurpose, AuditEvent, DirectoryAccount, DirectoryAccountToken, DirectoryEdgeConnection, DirectoryHome, DirectoryHomeMembership, DirectoryPairingCode } from '../domain/entities.js';
 import { AuthenticationError, ConflictError, ForbiddenError, NotFoundError, ValidationError, clockNow, createHome, createMembership, normalizeEmail, normalizeName, normalizeEdgeHostname } from '../domain/entities.js';
 
 export interface DirectoryStore {
@@ -11,6 +11,7 @@ export interface DirectoryStore {
   createAccountToken(token: DirectoryAccountToken): Promise<void>; findAccountTokenByHash(hash: string): Promise<DirectoryAccountToken | null>; consumeAccountToken(id: string, now: string): Promise<boolean>; updateAccount(account: DirectoryAccount): Promise<void>;
   append(event: { id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string }): Promise<void>; listForHome(homeId: string): Promise<Array<{ id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string }> >;
   createEdgeConnection(connection: DirectoryEdgeConnection): Promise<void>; findActiveByHomeId(homeId: string): Promise<DirectoryEdgeConnection | null>; findActiveByEdgeId(edgeId: string): Promise<DirectoryEdgeConnection | null>; revoke(id: string, revokedAt: string): Promise<boolean>;
+  rotateEdgeCredential(edgeId: string, expectedCredentialHash: string, newCredentialHash: string, auditEvent: AuditEvent): Promise<boolean>;
   invalidatePairingCodes(homeId:string, now:string): Promise<void>; createPairingCode(value: DirectoryPairingCode): Promise<void>; claimPairingCode(hash:string, now:string, connection:DirectoryEdgeConnection, edgeHostname:string): Promise<'claimed'|'invalid'|'used'|'expired'>;
 }
 
@@ -86,6 +87,13 @@ export class DirectoryService {
     const connection = await this.store.findActiveByEdgeId(edgeId);
     if (!connection || !safeCredentialMatch(connection.credentialHash, token)) return null;
     return { homeId: connection.homeId, edgeId: connection.edgeId };
+  }
+  async rotateEdgeCredential(currentCredential: string, identity: { homeId: string; edgeId: string }): Promise<{ token: string; homeId: string; edgeId: string }> {
+    const token = `${identity.edgeId}.${randomBytes(32).toString('base64url')}`;
+    const auditEvent: AuditEvent = { id: randomUUID(), actorAccountId: `edge:${identity.edgeId}`, homeId: identity.homeId, membershipId: null, action: 'edge.credential.rotated', createdAt: clockNow() };
+    const updated = await this.store.rotateEdgeCredential(identity.edgeId, hashEdgeCredential(currentCredential), hashEdgeCredential(token), auditEvent);
+    if (!updated) throw new ConflictError('EDGE_CREDENTIAL_ROTATION_CONFLICT');
+    return { token, homeId: identity.homeId, edgeId: identity.edgeId };
   }
   async auditEdgeAttestation(homeId: string, edgeId: string): Promise<void> {
     await this.audit(`edge:${edgeId}`, homeId, null, 'edge.attestation.issued');

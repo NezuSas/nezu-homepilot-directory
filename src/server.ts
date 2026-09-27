@@ -19,6 +19,7 @@ import { CloudGatewaySocketServer } from './infrastructure/CloudGatewaySocketSer
 
 export interface DirectoryServerOptions { databasePath?: string; jwtSecret?: string; invitationTtlMs?: number; serveWeb?: boolean; emailSender?: EmailSender; publicAppUrl?: string; store?: DirectoryStore & { close?: () => void | Promise<void> }; }
 type AuthenticatedRequest = FastifyRequest & { accountId: string };
+type EdgeCredentialRequest = FastifyRequest & { edgeIdentity: { homeId: string; edgeId: string } };
 export function buildServer(options: DirectoryServerOptions = {}): FastifyInstance {
   const database = options.store ?? new SqliteDirectoryDatabase(options.databasePath ?? process.env.DIRECTORY_DB_PATH ?? './data/directory.db');
   const jwtSecret = options.jwtSecret ?? process.env.DIRECTORY_JWT_SECRET;
@@ -31,6 +32,7 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
   const edgeAttestationAttempts = new Map<string, number[]>();
   const edgeServiceTokenIssuer = EdgeServiceTokenIssuer.fromEnvironment();
   const edgeServiceTokenAttempts = new Map<string, number[]>();
+  const edgeCredentialRotationAttempts = new Map<string, number[]>();
   const app = Fastify({logger:false});
   const gatewayRegistry = new CloudGatewayRegistry();
   const cloudGateway = new CloudGatewaySocketServer(gatewayRegistry, {
@@ -98,6 +100,30 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
     const token = edgeServiceTokenIssuer.issue(identity);
     await directory.auditEdgeServiceToken(identity.homeId, identity.edgeId);
     return { token, expiresIn: EDGE_SERVICE_TOKEN_TTL_SECONDS };
+  });
+  app.post('/directory/edge-credential/rotate', { onRequest: async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const authorization = request.headers.authorization;
+    const credential = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const identity = credential ? await directory.authenticateEdgeCredential(credential) : null;
+    if (!identity) throw new AuthenticationError('EDGE_CREDENTIAL_INVALID');
+    (request as EdgeCredentialRequest).edgeIdentity = identity;
+    if (Number(request.headers['content-length'] ?? 0) > 0 || request.headers['transfer-encoding'] !== undefined) throw new ValidationError('EDGE_CREDENTIAL_ROTATION_BODY_NOT_ALLOWED');
+  } }, async (request, reply) => {
+    const identity = (request as EdgeCredentialRequest).edgeIdentity;
+    const credential = request.headers.authorization!.slice(7);
+    if (request.body !== undefined) throw new ValidationError('EDGE_CREDENTIAL_ROTATION_BODY_NOT_ALLOWED');
+    const now = Date.now();
+    for (const [edgeId, attempts] of edgeCredentialRotationAttempts) {
+      const active = attempts.filter(timestamp => timestamp > now - 60_000);
+      if (active.length) edgeCredentialRotationAttempts.set(edgeId, active);
+      else edgeCredentialRotationAttempts.delete(edgeId);
+    }
+    const attempts = edgeCredentialRotationAttempts.get(identity.edgeId) ?? [];
+    if (attempts.length >= 10) return reply.code(429).send({ error: 'RATE_LIMIT_EXCEEDED' });
+    attempts.push(now);
+    edgeCredentialRotationAttempts.set(identity.edgeId, attempts);
+    return directory.rotateEdgeCredential(credential, identity);
   });
   app.register(async authRoutes => {
     await authRoutes.register(rateLimit, { max: authRateLimitMax, timeWindow: '1 minute' });
