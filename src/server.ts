@@ -8,7 +8,7 @@ import { AuthenticationError, ConflictError, DomainError, ForbiddenError, NotFou
 import { DirectoryService, type DirectoryStore } from './application/DirectoryService.js';
 import { DirectorySsoIssuer } from './application/DirectorySsoIssuer.js';
 import { EdgeAttestationIssuer, EDGE_ATTESTATION_KEY_ID, EDGE_ATTESTATION_TTL_SECONDS, EDGE_ATTESTATION_TYPE, validateEdgeAttestationChallenge } from './application/EdgeAttestationIssuer.js';
-import { EdgeServiceTokenIssuer, EDGE_SERVICE_TOKEN_KEY_ID, EDGE_SERVICE_TOKEN_TTL_SECONDS, EDGE_SERVICE_TOKEN_TYPE } from './application/EdgeServiceTokenIssuer.js';
+import { EdgeServiceTokenIssuer, EDGE_SERVICE_TOKEN_KEY_ID, EDGE_SERVICE_TOKEN_TTL_SECONDS, EDGE_SERVICE_TOKEN_TYPE, parseEdgeServiceTokenScope } from './application/EdgeServiceTokenIssuer.js';
 import { DirectorySessionService } from './application/DirectorySessionService.js';
 import { SqliteDirectoryDatabase } from './infrastructure/SqliteDirectoryDatabase.js';
 import { createEmailSenderFromEnvironment } from './infrastructure/EmailSenderFactory.js';
@@ -46,7 +46,7 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
     const frameworkStatus = typeof (error as { statusCode?: unknown }).statusCode === 'number' ? (error as { statusCode: number }).statusCode : undefined;
     const gatewayStatus = error instanceof CloudGatewayRegistryError ? (error.code === 'EDGE_OFFLINE' ? 503 : error.code === 'GATEWAY_REQUEST_EXPIRED' ? 504 : 409) : undefined;
     const status = error instanceof AuthenticationError ? 401 : error instanceof ForbiddenError ? 403 : error instanceof NotFoundError ? 404 : error instanceof ConflictError ? 409 : error instanceof ValidationError ? 400 : gatewayStatus ?? frameworkStatus ?? 500;
-    reply.code(status).send({ error: error instanceof DomainError ? error.code : error instanceof CloudGatewayRegistryError ? error.code : status === 429 ? 'RATE_LIMIT_EXCEEDED' : status === 415 ? 'UNSUPPORTED_MEDIA_TYPE' : 'INTERNAL_ERROR' });
+    reply.code(status).send({ error: error instanceof DomainError ? error.code : error instanceof CloudGatewayRegistryError ? error.code : status === 400 && _request.url.split('?')[0] === '/directory/edge-service-token' ? 'EDGE_SERVICE_TOKEN_INVALID_REQUEST' : status === 429 ? 'RATE_LIMIT_EXCEEDED' : status === 415 ? 'UNSUPPORTED_MEDIA_TYPE' : 'INTERNAL_ERROR' });
   });
   app.get('/health',async()=>({status:'ok'}));
   app.get('/directory/sso/public-key', async (_request, reply) => { if (!ssoIssuer) return reply.code(503).send({ error: 'SSO_NOT_CONFIGURED' }); return { publicKey: ssoIssuer.publicKey() }; });
@@ -79,13 +79,12 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
     if (!edgeServiceTokenIssuer) return reply.code(503).send({ error: 'EDGE_SERVICE_TOKEN_NOT_CONFIGURED' });
     return { type: EDGE_SERVICE_TOKEN_TYPE, algorithm: 'Ed25519', keyId: EDGE_SERVICE_TOKEN_KEY_ID, publicKey: edgeServiceTokenIssuer.publicKey() };
   });
-  app.post('/directory/edge-service-token', async (request, reply) => {
-    reply.header('Cache-Control', 'no-store');
+  app.post('/directory/edge-service-token', { onRequest: async (_request, reply) => { reply.header('Cache-Control', 'no-store'); } }, async (request, reply) => {
     const authorization = request.headers.authorization;
     const credential = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
     const identity = credential ? await directory.authenticateEdgeCredential(credential) : null;
     if (!identity) throw new AuthenticationError('EDGE_CREDENTIAL_INVALID');
-    if (request.body !== undefined) throw new ValidationError('EDGE_SERVICE_TOKEN_BODY_NOT_ALLOWED');
+    const scope = parseEdgeServiceTokenScope(request.body);
     if (!edgeServiceTokenIssuer) return reply.code(503).send({ error: 'EDGE_SERVICE_TOKEN_NOT_CONFIGURED' });
     const now = Date.now();
     for (const [edgeId, attempts] of edgeServiceTokenAttempts) {
@@ -97,7 +96,7 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
     if (attempts.length >= 10) return reply.code(429).send({ error: 'RATE_LIMIT_EXCEEDED' });
     attempts.push(now);
     edgeServiceTokenAttempts.set(identity.edgeId, attempts);
-    const token = edgeServiceTokenIssuer.issue(identity);
+    const token = edgeServiceTokenIssuer.issue(identity, scope);
     await directory.auditEdgeServiceToken(identity.homeId, identity.edgeId);
     return { token, expiresIn: EDGE_SERVICE_TOKEN_TTL_SECONDS };
   });

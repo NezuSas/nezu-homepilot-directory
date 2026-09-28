@@ -101,14 +101,51 @@ describe('Edge Service Token v1', () => {
     expect((await post(app, replacement.token)).statusCode).toBe(200);
   });
 
-  it('rejects caller-supplied claims or any request body', async () => {
+  it('keeps the bodyless manifest contract and accepts only explicit read or execute scope', async () => {
     const { app, db, service } = createApp();
     const edge = await pair(db, service);
-    for (const body of [{}, { homeId: edge.homeId }, { edgeId: edge.edgeId }, { scope: 'other' }, { audience: 'other' }]) {
+    for (const [body, expectedScope] of [
+      [undefined, 'homepilot.manifest.read'],
+      [{}, 'homepilot.manifest.read'],
+      [{ scope: 'homepilot.manifest.read' }, 'homepilot.manifest.read'],
+      [{ scope: 'homepilot.command.execute' }, 'homepilot.command.execute'],
+    ] as const) {
+      const response = await post(app, edge.token, body);
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(Object.keys(response.json())).toEqual(['token', 'expiresIn']);
+      const { token, expiresIn } = response.json() as { token: string; expiresIn: number };
+      expect(expiresIn).toBe(120);
+      const [encoded, signature] = token.split('.');
+      const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString()) as Record<string, unknown>;
+      expect(Object.keys(payload)).toEqual(['type', 'issuer', 'audience', 'keyId', 'scope', 'directoryHomeId', 'directoryEdgeId', 'iat', 'exp', 'jti']);
+      expect(payload).toMatchObject({ type: 'homepilot.edge-service-token.v1', issuer: 'homepilot-directory', audience: 'intentflow', keyId: 'edge-service-v1', scope: expectedScope, directoryHomeId: edge.homeId, directoryEdgeId: edge.edgeId });
+      expect(payload.exp).toBe((payload.iat as number) + 120);
+      expect(verify(null, Buffer.from(encoded), publicKey, Buffer.from(signature, 'base64url'))).toBe(true);
+    }
+  });
+
+  it('rejects invalid scopes, non-object bodies and any caller-supplied claim', async () => {
+    const { app, db, service } = createApp();
+    const edge = await pair(db, service);
+    for (const body of [
+      { scope: 'other' }, { scope: '*' }, { scope: 'homepilot.manifest.read homepilot.command.execute' },
+      { scope: ['homepilot.manifest.read', 'homepilot.command.execute'] },
+      { scope: null }, { scope: 1 }, { scope: true }, { scope: '' },
+      null, [], 5, true, 'homepilot.command.execute',
+      { scope: 'homepilot.command.execute', extra: true },
+      { homeId: edge.homeId }, { edgeId: edge.edgeId }, { directoryHomeId: edge.homeId }, { directoryEdgeId: edge.edgeId },
+      { audience: 'other' }, { issuer: 'other' }, { keyId: 'other' }, { type: 'other' },
+      { ttl: 999 }, { exp: 999 }, { iat: 0 }, { jti: randomUUID() },
+    ]) {
       const response = await post(app, edge.token, body);
       expect(response.statusCode).toBe(400);
-      expect(response.json()).toEqual({ error: 'EDGE_SERVICE_TOKEN_BODY_NOT_ALLOWED' });
+      expect(response.json()).toEqual({ error: 'EDGE_SERVICE_TOKEN_INVALID_REQUEST' });
     }
+    const malformed = await app.inject({ method: 'POST', url: '/directory/edge-service-token', payload: '{', headers: { authorization: `Bearer ${edge.token}`, 'content-type': 'application/json' } });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json()).toEqual({ error: 'EDGE_SERVICE_TOKEN_INVALID_REQUEST' });
+    expect(malformed.headers['cache-control']).toBe('no-store');
   });
 
   it('returns 503 without an issuer and publishes only its public key when configured', async () => {
