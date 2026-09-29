@@ -8,7 +8,8 @@ export type AccountTokenPurpose = 'email_verify' | 'password_reset';
 export interface DirectoryAccountToken { id: string; accountId: string; purpose: AccountTokenPurpose; tokenHash: string; expiresAt: string; usedAt: string | null; createdAt: string; }
 export interface DirectoryHome { id: string; name: string; edgeHostname: string; ownerAccountId: string; createdAt: string; updatedAt: string; }
 export interface DirectoryHomeMembership { id: string; homeId: string; accountId: string; role: MembershipRole; status: MembershipStatus; invitedByAccountId: string | null; invitationTokenHash: string | null; invitationExpiresAt: string | null; createdAt: string; updatedAt: string; }
-export interface DirectoryEdgeConnection { id: string; homeId: string; edgeId: string; credentialHash: string; createdAt: string; revokedAt: string | null; }
+export interface DirectoryEdgeConnection { id: string; homeId: string; edgeId: string; credentialHash: string; createdAt: string; revokedAt: string | null; deviceBindingState?: 'unbound' | 'bound'; deviceKeyId?: string | null; devicePublicKey?: string | null; deviceKeyAlgorithm?: 'ES256' | null; deviceBoundAt?: string | null; }
+export interface DirectoryDeviceChallenge { id: string; homeId: string; edgeId: string; nonce: string; requestedScope: 'homepilot.manifest.read' | 'homepilot.command.execute'; expiresAt: string; consumedAt: string | null; }
 export interface DirectoryPairingCode { id:string; homeId:string; codeHash:string; expiresAt:string; usedAt:string|null; createdAt:string; }
 export interface AuditEvent { id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string; }
 

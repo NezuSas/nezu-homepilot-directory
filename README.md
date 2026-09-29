@@ -100,3 +100,7 @@ El límite de 10 emisiones por minuto usa memoria del proceso Directory. Una ins
 ## Edge Service Token v1
 
 Un Edge activo puede solicitar `POST /directory/edge-service-token` con su Edge credential en `Authorization: Bearer` para recibir `{ "token": "<payload64>.<signature64>", "expiresIn": 120 }`. Sin body, el scope sigue siendo `homepilot.manifest.read`; un body JSON estricto puede elegir `homepilot.manifest.read` o `homepilot.command.execute`. La respuesta incluye `Cache-Control: no-store`. Cada token Ed25519 autentica al Edge ante IntentFlow para un solo scope; no representa a un usuario ni sustituye Edge Attestation. IntentFlow aplicará la separación de privilegios por endpoint. `GET /directory/edge-service-token/public-key` publica la clave pública. Configura una tercera clave privada Ed25519 PEM independiente en `DIRECTORY_EDGE_SERVICE_PRIVATE_KEY`; sin ella ambos endpoints responden `503 EDGE_SERVICE_TOKEN_NOT_CONFIGURED`. El contrato y los límites se detallan en `specs/edge-service-token-v1.md`.
+
+### Device binding
+
+Un Edge histórico sin binding conserva la emisión anterior. Un Edge que registra una clave pública P-256 mediante `POST /directory/edge-device/enroll` requiere después un challenge de `POST /directory/edge-device/challenge` y una firma ES256 de posesión para cada service token. El formato canónico, la caducidad de 60 segundos y el contrato completo están en `specs/edge-device-binding-v1.md`. Directory almacena solo la clave pública; la clave privada debe permanecer protegida en HomePilot.

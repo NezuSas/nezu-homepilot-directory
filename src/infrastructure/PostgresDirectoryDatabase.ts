@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import type { DirectoryStore } from '../application/DirectoryService.js';
-import type { AccountTokenPurpose, AuditEvent, DirectoryAccount, DirectoryAccountToken, DirectoryEdgeConnection, DirectoryPairingCode, DirectoryHome, DirectoryHomeMembership, MembershipStatus } from '../domain/entities.js';
+import type { AccountTokenPurpose, AuditEvent, DirectoryAccount, DirectoryAccountToken, DirectoryDeviceChallenge, DirectoryEdgeConnection, DirectoryPairingCode, DirectoryHome, DirectoryHomeMembership, MembershipStatus } from '../domain/entities.js';
+import type { EdgeServiceTokenScope } from '../application/EdgeServiceTokenIssuer.js';
 
 export class PostgresDirectoryDatabase implements DirectoryStore {
   private readonly pool: Pool;
@@ -14,6 +15,13 @@ export class PostgresDirectoryDatabase implements DirectoryStore {
       CREATE TABLE IF NOT EXISTS directory_audit_events (id TEXT PRIMARY KEY, actor_account_id TEXT NOT NULL, home_id TEXT, membership_id TEXT, action TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL);
       CREATE INDEX IF NOT EXISTS idx_audit_home_created ON directory_audit_events(home_id, created_at DESC); CREATE TABLE IF NOT EXISTS directory_account_tokens (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES directory_accounts(id) ON DELETE CASCADE, purpose TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL); ALTER TABLE directory_accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE; CREATE TABLE IF NOT EXISTS directory_edge_connections (id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES directory_homes(id) ON DELETE CASCADE, edge_id TEXT NOT NULL UNIQUE, credential_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, revoked_at TIMESTAMPTZ); CREATE TABLE IF NOT EXISTS directory_pairing_codes (id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES directory_homes(id) ON DELETE CASCADE, code_hash TEXT NOT NULL UNIQUE, expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL);
     `);
+    await this.pool.query(`ALTER TABLE directory_edge_connections ADD COLUMN IF NOT EXISTS device_binding_state TEXT NOT NULL DEFAULT 'unbound';
+      ALTER TABLE directory_edge_connections ADD COLUMN IF NOT EXISTS device_key_id TEXT;
+      ALTER TABLE directory_edge_connections ADD COLUMN IF NOT EXISTS device_public_key TEXT;
+      ALTER TABLE directory_edge_connections ADD COLUMN IF NOT EXISTS device_key_algorithm TEXT;
+      ALTER TABLE directory_edge_connections ADD COLUMN IF NOT EXISTS device_bound_at TIMESTAMPTZ;
+      CREATE TABLE IF NOT EXISTS directory_edge_device_challenges (id TEXT PRIMARY KEY, home_id TEXT NOT NULL REFERENCES directory_homes(id) ON DELETE CASCADE, edge_id TEXT NOT NULL REFERENCES directory_edge_connections(edge_id) ON DELETE CASCADE, nonce TEXT NOT NULL, requested_scope TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, consumed_at TIMESTAMPTZ);
+      CREATE INDEX IF NOT EXISTS idx_edge_device_challenges_edge ON directory_edge_device_challenges(edge_id, expires_at);`);
     const duplicate = (await this.pool.query('SELECT home_id FROM directory_edge_connections WHERE revoked_at IS NULL GROUP BY home_id HAVING COUNT(*) > 1 LIMIT 1')).rows[0] as { home_id: string } | undefined;
     if (duplicate) throw new Error(`Multiple active Edges for home ${duplicate.home_id}; resolve before migration.`);
     await this.pool.query('CREATE UNIQUE INDEX IF NOT EXISTS ux_edge_connections_active_home ON directory_edge_connections(home_id) WHERE revoked_at IS NULL');
@@ -38,6 +46,10 @@ export class PostgresDirectoryDatabase implements DirectoryStore {
   async createEdgeConnection(value: DirectoryEdgeConnection): Promise<void> { await this.pool.query('INSERT INTO directory_edge_connections (id,home_id,edge_id,credential_hash,created_at,revoked_at) VALUES ($1,$2,$3,$4,$5,$6)',[value.id,value.homeId,value.edgeId,value.credentialHash,value.createdAt,value.revokedAt]); }
   async findActiveByHomeId(homeId: string): Promise<DirectoryEdgeConnection | null> { return mapEdgeConnection((await this.pool.query('SELECT * FROM directory_edge_connections WHERE home_id=$1 AND revoked_at IS NULL',[homeId])).rows[0]); }
   async findActiveByEdgeId(edgeId: string): Promise<DirectoryEdgeConnection | null> { return mapEdgeConnection((await this.pool.query('SELECT * FROM directory_edge_connections WHERE edge_id=$1 AND revoked_at IS NULL',[edgeId])).rows[0]); }
+  async enrollDeviceKey(edgeId: string, homeId: string, expectedCredentialHash: string, keyId: string, publicKey: string, algorithm: 'ES256', boundAt: string): Promise<boolean> { return (await this.pool.query("UPDATE directory_edge_connections SET device_binding_state='bound',device_key_id=$1,device_public_key=$2,device_key_algorithm=$3,device_bound_at=$4 WHERE edge_id=$5 AND home_id=$6 AND credential_hash=$7 AND revoked_at IS NULL AND device_binding_state='unbound'",[keyId,publicKey,algorithm,boundAt,edgeId,homeId,expectedCredentialHash])).rowCount===1; }
+  async createDeviceChallenge(challenge: DirectoryDeviceChallenge): Promise<void> { await this.pool.query('INSERT INTO directory_edge_device_challenges (id,home_id,edge_id,nonce,requested_scope,expires_at,consumed_at) VALUES ($1,$2,$3,$4,$5,$6,$7)',[challenge.id,challenge.homeId,challenge.edgeId,challenge.nonce,challenge.requestedScope,challenge.expiresAt,challenge.consumedAt]); }
+  async findDeviceChallenge(id: string): Promise<DirectoryDeviceChallenge | null> { const row=(await this.pool.query('SELECT * FROM directory_edge_device_challenges WHERE id=$1',[id])).rows[0] as Row|undefined; return row?mapDeviceChallenge(row):null; }
+  async consumeDeviceChallenge(id: string, edgeId: string, homeId: string, scope: EdgeServiceTokenScope, now: string): Promise<boolean> { return (await this.pool.query('UPDATE directory_edge_device_challenges SET consumed_at=$1 WHERE id=$2 AND edge_id=$3 AND home_id=$4 AND requested_scope=$5 AND consumed_at IS NULL AND expires_at>$1',[now,id,edgeId,homeId,scope])).rowCount===1; }
   async rotateEdgeCredential(edgeId: string, expectedCredentialHash: string, newCredentialHash: string, auditEvent: AuditEvent): Promise<boolean> {
     const client = await this.pool.connect();
     try {
@@ -62,7 +74,8 @@ export class PostgresDirectoryDatabase implements DirectoryStore {
 }
 type Row=Record<string,unknown>;
 const iso=(value:unknown):string=>value instanceof Date?value.toISOString():String(value);
-const mapEdgeConnection=(row:Row|undefined):DirectoryEdgeConnection|null=>row?{id:String(row.id),homeId:String(row.home_id),edgeId:String(row.edge_id),credentialHash:String(row.credential_hash),createdAt:iso(row.created_at),revokedAt:row.revoked_at===null?null:iso(row.revoked_at)}:null;
+const mapEdgeConnection=(row:Row|undefined):DirectoryEdgeConnection|null=>row?{id:String(row.id),homeId:String(row.home_id),edgeId:String(row.edge_id),credentialHash:String(row.credential_hash),createdAt:iso(row.created_at),revokedAt:row.revoked_at===null?null:iso(row.revoked_at),deviceBindingState:String(row.device_binding_state) as 'unbound'|'bound',deviceKeyId:row.device_key_id===null?null:String(row.device_key_id),devicePublicKey:row.device_public_key===null?null:String(row.device_public_key),deviceKeyAlgorithm:row.device_key_algorithm===null?null:String(row.device_key_algorithm) as 'ES256',deviceBoundAt:row.device_bound_at===null?null:iso(row.device_bound_at)}:null;
+const mapDeviceChallenge=(row:Row):DirectoryDeviceChallenge=>({id:String(row.id),homeId:String(row.home_id),edgeId:String(row.edge_id),nonce:String(row.nonce),requestedScope:String(row.requested_scope) as EdgeServiceTokenScope,expiresAt:iso(row.expires_at),consumedAt:row.consumed_at===null?null:iso(row.consumed_at)});
 const mapAccount=(row:Row|undefined):DirectoryAccount|null=>row?{id:String(row.id),email:String(row.email),passwordHash:String(row.password_hash),displayName:String(row.display_name),emailVerified:Boolean(row.email_verified),createdAt:iso(row.created_at)}:null;
 const mapHome=(row:Row|undefined):DirectoryHome|null=>row?{id:String(row.id),name:String(row.name),edgeHostname:String(row.edge_hostname),ownerAccountId:String(row.owner_account_id),createdAt:iso(row.created_at),updatedAt:iso(row.updated_at)}:null;
 const mapMembership=(row:Row|undefined):DirectoryHomeMembership|null=>row?mapMembershipRequired(row):null;

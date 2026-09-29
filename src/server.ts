@@ -9,6 +9,7 @@ import { DirectoryService, type DirectoryStore } from './application/DirectorySe
 import { DirectorySsoIssuer } from './application/DirectorySsoIssuer.js';
 import { EdgeAttestationIssuer, EDGE_ATTESTATION_KEY_ID, EDGE_ATTESTATION_TTL_SECONDS, EDGE_ATTESTATION_TYPE, validateEdgeAttestationChallenge } from './application/EdgeAttestationIssuer.js';
 import { EdgeServiceTokenIssuer, EDGE_SERVICE_TOKEN_KEY_ID, EDGE_SERVICE_TOKEN_TTL_SECONDS, EDGE_SERVICE_TOKEN_TYPE, parseEdgeServiceTokenScope } from './application/EdgeServiceTokenIssuer.js';
+import { parseBoundTokenRequest } from './application/EdgeDeviceBinding.js';
 import { DirectorySessionService } from './application/DirectorySessionService.js';
 import { SqliteDirectoryDatabase } from './infrastructure/SqliteDirectoryDatabase.js';
 import { createEmailSenderFromEnvironment } from './infrastructure/EmailSenderFactory.js';
@@ -79,12 +80,29 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
     if (!edgeServiceTokenIssuer) return reply.code(503).send({ error: 'EDGE_SERVICE_TOKEN_NOT_CONFIGURED' });
     return { type: EDGE_SERVICE_TOKEN_TYPE, algorithm: 'Ed25519', keyId: EDGE_SERVICE_TOKEN_KEY_ID, publicKey: edgeServiceTokenIssuer.publicKey() };
   });
+  app.post('/directory/edge-device/enroll', { onRequest: async (_request, reply) => { reply.header('Cache-Control', 'no-store'); } }, async (request, reply) => {
+    const authorization = request.headers.authorization;
+    const credential = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const identity = credential ? await directory.authenticateEdgeCredential(credential) : null;
+    if (!identity) throw new AuthenticationError('EDGE_CREDENTIAL_INVALID');
+    const enrollment = await directory.enrollEdgeDevice(credential, identity, request.body);
+    return reply.code(201).send(enrollment);
+  });
+  app.post('/directory/edge-device/challenge', { onRequest: async (_request, reply) => { reply.header('Cache-Control', 'no-store'); } }, async (request) => {
+    const authorization = request.headers.authorization;
+    const credential = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const identity = credential ? await directory.authenticateEdgeCredential(credential) : null;
+    if (!identity) throw new AuthenticationError('EDGE_CREDENTIAL_INVALID');
+    return directory.createEdgeDeviceChallenge(identity, parseEdgeServiceTokenScope(request.body));
+  });
   app.post('/directory/edge-service-token', { onRequest: async (_request, reply) => { reply.header('Cache-Control', 'no-store'); } }, async (request, reply) => {
     const authorization = request.headers.authorization;
     const credential = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
     const identity = credential ? await directory.authenticateEdgeCredential(credential) : null;
     if (!identity) throw new AuthenticationError('EDGE_CREDENTIAL_INVALID');
-    const scope = parseEdgeServiceTokenScope(request.body);
+    const connection = await directory.activeEdgeConnection(identity);
+    const boundRequest = connection.deviceBindingState === 'bound' ? parseBoundTokenRequest(request.body) : null;
+    const scope = boundRequest?.scope ?? parseEdgeServiceTokenScope(request.body);
     if (!edgeServiceTokenIssuer) return reply.code(503).send({ error: 'EDGE_SERVICE_TOKEN_NOT_CONFIGURED' });
     const now = Date.now();
     for (const [edgeId, attempts] of edgeServiceTokenAttempts) {
@@ -96,6 +114,7 @@ export function buildServer(options: DirectoryServerOptions = {}): FastifyInstan
     if (attempts.length >= 10) return reply.code(429).send({ error: 'RATE_LIMIT_EXCEEDED' });
     attempts.push(now);
     edgeServiceTokenAttempts.set(identity.edgeId, attempts);
+    if (boundRequest) await directory.verifyAndConsumeEdgeDeviceProof(identity, scope, boundRequest.proof);
     const token = edgeServiceTokenIssuer.issue(identity, scope);
     await directory.auditEdgeServiceToken(identity.homeId, identity.edgeId);
     return { token, expiresIn: EDGE_SERVICE_TOKEN_TTL_SECONDS };

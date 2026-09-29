@@ -1,7 +1,9 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { NoopEmailSender, type EmailSender } from './EmailSender.js';
-import type { AccountTokenPurpose, AuditEvent, DirectoryAccount, DirectoryAccountToken, DirectoryEdgeConnection, DirectoryHome, DirectoryHomeMembership, DirectoryPairingCode } from '../domain/entities.js';
+import type { AccountTokenPurpose, AuditEvent, DirectoryAccount, DirectoryAccountToken, DirectoryDeviceChallenge, DirectoryEdgeConnection, DirectoryHome, DirectoryHomeMembership, DirectoryPairingCode } from '../domain/entities.js';
+import { DEVICE_CHALLENGE_TTL_SECONDS, canonicalDeviceProofPayload, parseDeviceEnrollment, verifyDeviceProof, type DeviceProof } from './EdgeDeviceBinding.js';
+import type { EdgeServiceTokenScope } from './EdgeServiceTokenIssuer.js';
 import { AuthenticationError, ConflictError, ForbiddenError, NotFoundError, ValidationError, clockNow, createHome, createMembership, normalizeEmail, normalizeName, normalizeEdgeHostname } from '../domain/entities.js';
 
 export interface DirectoryStore {
@@ -11,6 +13,9 @@ export interface DirectoryStore {
   createAccountToken(token: DirectoryAccountToken): Promise<void>; findAccountTokenByHash(hash: string): Promise<DirectoryAccountToken | null>; consumeAccountToken(id: string, now: string): Promise<boolean>; updateAccount(account: DirectoryAccount): Promise<void>;
   append(event: { id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string }): Promise<void>; listForHome(homeId: string): Promise<Array<{ id: string; actorAccountId: string; homeId: string | null; membershipId: string | null; action: string; createdAt: string }> >;
   createEdgeConnection(connection: DirectoryEdgeConnection): Promise<void>; findActiveByHomeId(homeId: string): Promise<DirectoryEdgeConnection | null>; findActiveByEdgeId(edgeId: string): Promise<DirectoryEdgeConnection | null>; revoke(id: string, revokedAt: string): Promise<boolean>;
+  enrollDeviceKey(edgeId: string, homeId: string, expectedCredentialHash: string, keyId: string, publicKey: string, algorithm: 'ES256', boundAt: string): Promise<boolean>;
+  createDeviceChallenge(challenge: DirectoryDeviceChallenge): Promise<void>; findDeviceChallenge(id: string): Promise<DirectoryDeviceChallenge | null>;
+  consumeDeviceChallenge(id: string, edgeId: string, homeId: string, scope: EdgeServiceTokenScope, now: string): Promise<boolean>;
   rotateEdgeCredential(edgeId: string, expectedCredentialHash: string, newCredentialHash: string, auditEvent: AuditEvent): Promise<boolean>;
   invalidatePairingCodes(homeId:string, now:string): Promise<void>; createPairingCode(value: DirectoryPairingCode): Promise<void>; claimPairingCode(hash:string, now:string, connection:DirectoryEdgeConnection, edgeHostname:string): Promise<'claimed'|'invalid'|'used'|'expired'>;
 }
@@ -87,6 +92,45 @@ export class DirectoryService {
     const connection = await this.store.findActiveByEdgeId(edgeId);
     if (!connection || !safeCredentialMatch(connection.credentialHash, token)) return null;
     return { homeId: connection.homeId, edgeId: connection.edgeId };
+  }
+  async activeEdgeConnection(identity: { homeId: string; edgeId: string }): Promise<DirectoryEdgeConnection> {
+    const connection = await this.store.findActiveByEdgeId(identity.edgeId);
+    if (!connection || connection.homeId !== identity.homeId) throw new AuthenticationError('EDGE_CREDENTIAL_INVALID');
+    return connection;
+  }
+  async enrollEdgeDevice(credential: string, identity: { homeId: string; edgeId: string }, body: unknown): Promise<{ edgeId: string; keyId: string; algorithm: 'ES256'; boundAt: string }> {
+    const enrollment = parseDeviceEnrollment(body);
+    const connection = await this.activeEdgeConnection(identity);
+    if (connection.deviceBindingState === 'bound') throw new ConflictError('DEVICE_ALREADY_BOUND');
+    const boundAt = clockNow();
+    if (!await this.store.enrollDeviceKey(identity.edgeId, identity.homeId, hashEdgeCredential(credential), enrollment.keyId, enrollment.publicKey, enrollment.algorithm, boundAt)) throw new ConflictError('DEVICE_ALREADY_BOUND');
+    await this.audit(`edge:${identity.edgeId}`, identity.homeId, null, 'edge.device.bound');
+    return { edgeId: identity.edgeId, keyId: enrollment.keyId, algorithm: enrollment.algorithm, boundAt };
+  }
+  async createEdgeDeviceChallenge(identity: { homeId: string; edgeId: string }, scope: EdgeServiceTokenScope): Promise<{ challengeId: string; nonce: string; scope: EdgeServiceTokenScope; expiresIn: number }> {
+    const connection = await this.activeEdgeConnection(identity);
+    if (connection.deviceBindingState !== 'bound') throw new ConflictError('DEVICE_NOT_BOUND');
+    const challenge: DirectoryDeviceChallenge = { id: randomUUID(), edgeId: identity.edgeId, homeId: identity.homeId, nonce: randomBytes(32).toString('base64url'), requestedScope: scope, expiresAt: new Date(Date.now() + DEVICE_CHALLENGE_TTL_SECONDS * 1000).toISOString(), consumedAt: null };
+    await this.store.createDeviceChallenge(challenge);
+    return { challengeId: challenge.id, nonce: challenge.nonce, scope, expiresIn: DEVICE_CHALLENGE_TTL_SECONDS };
+  }
+  async verifyAndConsumeEdgeDeviceProof(identity: { homeId: string; edgeId: string }, scope: EdgeServiceTokenScope, proof: DeviceProof): Promise<void> {
+    const connection = await this.activeEdgeConnection(identity);
+    if (connection.deviceBindingState !== 'bound' || !connection.devicePublicKey || !connection.deviceKeyId || connection.deviceKeyAlgorithm !== 'ES256') throw new ValidationError('DEVICE_PROOF_INVALID');
+    if (proof.keyId !== connection.deviceKeyId) throw new ValidationError('DEVICE_PROOF_INVALID');
+    const challenge = await this.store.findDeviceChallenge(proof.challengeId);
+    if (!challenge || challenge.edgeId !== identity.edgeId || challenge.homeId !== identity.homeId || challenge.requestedScope !== scope) throw new ValidationError('DEVICE_PROOF_INVALID');
+    if (challenge.consumedAt) throw new ValidationError('DEVICE_CHALLENGE_CONSUMED');
+    const now = clockNow();
+    if (Date.parse(challenge.expiresAt) <= Date.parse(now)) throw new ValidationError('DEVICE_CHALLENGE_EXPIRED');
+    const payload = canonicalDeviceProofPayload({ homeId: identity.homeId, edgeId: identity.edgeId, challengeId: challenge.id, nonce: challenge.nonce, scopes: [scope] });
+    if (!verifyDeviceProof(connection.devicePublicKey, payload, proof.signature)) throw new ValidationError('DEVICE_PROOF_INVALID');
+    if (!await this.store.consumeDeviceChallenge(challenge.id, identity.edgeId, identity.homeId, scope, now)) {
+      const latest = await this.store.findDeviceChallenge(challenge.id);
+      if (latest?.consumedAt) throw new ValidationError('DEVICE_CHALLENGE_CONSUMED');
+      if (latest && Date.parse(latest.expiresAt) <= Date.parse(clockNow())) throw new ValidationError('DEVICE_CHALLENGE_EXPIRED');
+      throw new ValidationError('DEVICE_PROOF_INVALID');
+    }
   }
   async rotateEdgeCredential(currentCredential: string, identity: { homeId: string; edgeId: string }): Promise<{ token: string; homeId: string; edgeId: string }> {
     const token = `${identity.edgeId}.${randomBytes(32).toString('base64url')}`;
